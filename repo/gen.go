@@ -23,6 +23,10 @@ type Wanted struct {
 	// Branch tracks the head commit of a branch instead of a release. VCS
 	// packages (-git) use this: they package a moving branch, not a tarball.
 	Branch string
+	// RepoDescription asks the app to also resolve the repository's About
+	// description into Upstream.Description, for packages that use it as
+	// pkgdesc.
+	RepoDescription bool
 }
 
 // Asset is a release artefact.
@@ -43,6 +47,9 @@ type Upstream struct {
 	Date string
 	// Assets are the release artefacts, empty in branch mode.
 	Assets []Asset
+	// Description is the repository's About text, when requested via
+	// Wanted.RepoDescription.
+	Description string
 	// Fingerprint identifies this exact upstream state. It changes when the
 	// underlying content changes even though the version string may not (a
 	// republished release, a rebuilt asset).

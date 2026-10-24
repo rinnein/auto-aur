@@ -40,6 +40,11 @@ type BranchReader interface {
 	BranchHead(repo, branch string) (*github.Commit, error)
 }
 
+// RepoReader resolves repository metadata, used for the About description.
+type RepoReader interface {
+	RepoInfo(repo string) (*github.Repository, error)
+}
+
 // Lookup reports whether an AUR package exists.
 type Lookup interface {
 	Lookup(pkgbase string) (aur.Info, bool, error)
@@ -64,6 +69,7 @@ type PublishRequest struct {
 type Deps struct {
 	Fetch    Fetcher
 	Branches BranchReader
+	Repos    RepoReader
 	Lookup   Lookup
 	Publish  Publisher
 	Checksum repo.Checksum
@@ -196,30 +202,57 @@ func runTask(cfg *conf.Config, p conf.Package, opts Options, remote aur.Remote, 
 	}
 	res.Pkgver = pkgver
 
-	// Decide pkgrel before rendering. A rebuilt upstream asset (same version,
-	// different bytes) must bump pkgrel or pacman would never upgrade.
-	pkgrel := 1
-	if prev.Pkgver == pkgver && prev.Fingerprint != "" && prev.Fingerprint != up.Fingerprint {
-		if prev.Pkgrel > 0 {
-			pkgrel = prev.Pkgrel + 1
-		}
-		res.Reason = "upstream content changed for the same version"
+	// Rendering happens twice in the worst case: once to learn what the package
+	// would look like with the currently published pkgrel, and again if that
+	// content turns out to differ. Network results are memoised so the .deb is
+	// still downloaded only once.
+	net := repo.Net{
+		Checksum: memoChecksum(deps.Checksum),
+		Digest:   memoDigest(deps.Digest),
 	}
 
-	net := repo.Net{
-		Checksum: deps.Checksum,
-		Digest:   deps.Digest,
+	// Continue the previous pkgrel when the version is unchanged, so a series of
+	// rebuilds keeps counting up instead of restarting at 1.
+	rel := 1
+	if prev.Pkgver == pkgver && prev.Pkgrel > 0 {
+		rel = prev.Pkgrel
 	}
-	genned, err := gen.Render(repo.Context{Upstream: up, Pkgrel: pkgrel, Net: net})
+
+	genned, err := gen.Render(repo.Context{Upstream: up, Pkgrel: rel, Net: net})
 	if err != nil {
 		res.Action, res.Err = "failed", err
 		return res
 	}
+
+	// A change that keeps the same version must still bump pkgrel, otherwise
+	// pacman considers the installed copy up to date and users never receive the
+	// fix. Two causes count: rebuilt upstream content (fingerprint) and an
+	// edited package definition (dependency fix, description, ...).
+	bump, why := false, ""
+	if prev.Pkgver == pkgver && prev.Pkgrel > 0 {
+		publishedPath := filepath.Join(dir, "PKGBUILD")
+		switch diffs := metadataDiff(publishedPath, genned.Fields); {
+		case prev.Fingerprint != up.Fingerprint:
+			bump, why = true, "upstream content changed for the same version"
+		case len(diffs) > 0:
+			bump, why = true, "package definition changed: "+strings.Join(diffs, "; ")
+		}
+	}
+	if bump {
+		rel++
+		res.Reason = why
+		genned, err = gen.Render(repo.Context{Upstream: up, Pkgrel: rel, Net: net})
+		if err != nil {
+			res.Action, res.Err = "failed", err
+			return res
+		}
+	}
+
 	if genned.Pkgver != "" {
 		res.Pkgver = genned.Pkgver
 	}
 	if genned.Pkgrel == 0 {
-		genned.Pkgrel = pkgrel
+		genned.Pkgrel = rel
 	}
 	res.Upstream = genned
 
@@ -297,11 +330,15 @@ func resolveUpstream(w repo.Wanted, deps Deps) (repo.Upstream, error) {
 		if err != nil {
 			return repo.Upstream{}, err
 		}
-		return repo.Upstream{
+		up := repo.Upstream{
 			Commit:      head.SHA,
 			Date:        utcDate(head.Info.Committer.Date),
 			Fingerprint: head.SHA,
-		}, nil
+		}
+		if err := addDescription(&up, w, deps); err != nil {
+			return repo.Upstream{}, err
+		}
+		return up, nil
 	}
 	if deps.Fetch == nil {
 		return repo.Upstream{}, fmt.Errorf("no release fetcher configured")
@@ -310,13 +347,35 @@ func resolveUpstream(w repo.Wanted, deps Deps) (repo.Upstream, error) {
 	if err != nil {
 		return repo.Upstream{}, err
 	}
-	return repo.Upstream{
+	up := repo.Upstream{
 		Tag:         rel.TagName,
 		Commit:      commitFromRelease(rel),
 		Date:        utcDate(rel.PublishedAt),
 		Assets:      toRepoAssets(rel.Assets),
 		Fingerprint: releaseFingerprint(rel),
-	}, nil
+	}
+	if err := addDescription(&up, w, deps); err != nil {
+		return repo.Upstream{}, err
+	}
+	return up, nil
+}
+
+// addDescription fills Upstream.Description when the task asks for it. A failure
+// is reported rather than silently falling back: a default description would
+// look like a recipe change and trigger a needless pkgrel bump.
+func addDescription(up *repo.Upstream, w repo.Wanted, deps Deps) error {
+	if !w.RepoDescription {
+		return nil
+	}
+	if deps.Repos == nil {
+		return fmt.Errorf("task %q wants the repository description but no repo reader is configured", w.Repo)
+	}
+	info, err := deps.Repos.RepoInfo(w.Repo)
+	if err != nil {
+		return err
+	}
+	up.Description = info.Description
+	return nil
 }
 
 // releaseFingerprint changes when the release is republished or any asset is
@@ -455,3 +514,44 @@ func RunContext(ctx context.Context, opts Options, deps Deps) ([]Result, error) 
 }
 
 var _ = gitx.Runner{}
+
+// memoChecksum caches checksum lookups for the duration of one task, so the
+// two-phase render does not refetch them.
+func memoChecksum(fn repo.Checksum) repo.Checksum {
+	if fn == nil {
+		return nil
+	}
+	cache := map[string]string{}
+	return func(url string) (string, error) {
+		if v, ok := cache[url]; ok {
+			return v, nil
+		}
+		v, err := fn(url)
+		if err != nil {
+			return "", err
+		}
+		cache[url] = v
+		return v, nil
+	}
+}
+
+// memoDigest caches asset digests, which is what keeps a 40 MB .deb from being
+// downloaded twice when the render has to be repeated.
+func memoDigest(fn repo.Digest) repo.Digest {
+	if fn == nil {
+		return nil
+	}
+	cache := map[string]string{}
+	return func(url, algo string) (string, error) {
+		key := algo + " " + url
+		if v, ok := cache[key]; ok {
+			return v, nil
+		}
+		v, err := fn(url, algo)
+		if err != nil {
+			return "", err
+		}
+		cache[key] = v
+		return v, nil
+	}
+}

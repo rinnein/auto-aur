@@ -9,6 +9,10 @@
 | `your-szu-life-bin` | `your-szu-life-bin` | `canary` release 里的预编译 `.deb` |
 | `your-szu-life-git` | `your-szu-life-git` | `main` 分支源码构建 |
 
+两个包的 `pkgdesc` 都取自上游仓库的 **About description**（GitHub 上的仓库简介），每次运行动态获取：改一次 GitHub 上的简介，AUR 上的描述就会跟着更新（并自动 `pkgrel+1` 让已安装用户收到）。仓库没填简介时退回内置默认值，并在运行摘要里说明。
+
+另外：deb 里自带了一个 Debian 版的 `aria2c`，它依赖的 `libaria2.so.0` 并不在 deb 内，装到 `/usr/bin/aria2c` 会与 `aria2` 包冲突（`filesystem conflict on /usr/bin/aria2c`）。打包时该文件会被删除，改由 `depends=('aria2')` 提供真正的 `aria2c`。
+
 两个包都 `provides=('your-szu-life')` 且互相 `conflicts`，因此：
 
 ```sh
@@ -180,6 +184,6 @@ go test ./...
 - **fingerprint** 标识上游的确切内容。release 任务用 tag + 发布时间 + 每个资产的名字/大小/更新时间；`-git` 任务用提交 SHA。
 - 版本变了 → 重发，`pkgrel` 归 1。
 - 版本没变但 fingerprint 变了（比如 `canary` 用同一个版本号重建了 deb）→ **`pkgrel` 自增**，否则 pacman 会认为已是最新而不升级。
-- 两者都没变 → 只比较 PKGBUILD 的字段，字段也没变才跳过。
+- 两者都没变 → 再比较 PKGBUILD 的字段（依赖、描述等）；字段变了同样 `pkgrel+1` 后重发，字段也没变才跳过。
 
 `-bin` 包每次运行都会下载一次 deb 来算 sha256（release 没有附带校验和文件），约 39 MB；`-git` 包不下载任何东西。

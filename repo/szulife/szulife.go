@@ -26,7 +26,7 @@ func (g *binGen) Wanted() repo.Wanted {
 	// The canary tag is reused for every build, so its tag never changes; the
 	// version comes from the asset filename and the fingerprint from the
 	// release metadata.
-	return repo.Wanted{Repo: upstreamRepo, Tag: releaseTag}
+	return repo.Wanted{Repo: upstreamRepo, Tag: releaseTag, RepoDescription: true}
 }
 
 func (g *binGen) WithMaintainer(m string, _ conf.Overrides) repo.Generator {
@@ -80,7 +80,8 @@ func (g *binGen) Render(ctx repo.Context) (repo.Generated, error) {
 		pkgrel = 1
 	}
 
-	desc := pkgdesc + " (prebuilt Debian package)"
+	// pkgdesc is the upstream About text, resolved per run.
+	desc, note := chooseDesc(ctx.Upstream)
 	var b strings.Builder
 	b.WriteString(commonHeader(pkgBin, ver, pkgrel, desc))
 	// A prebuilt binary must not be stripped, and debug splitting would only
@@ -104,7 +105,7 @@ package() {
   fi
   bsdtar -xf "${_debname}" "${inner}"
   bsdtar -xf "${inner}" -C "${pkgdir}"
-}
+` + dropBundledAria2 + `}
 `)
 
 	src := b.String()
@@ -116,6 +117,7 @@ package() {
 		Srcinfo:     srcinfo(pkgBin, desc, ver, pkgrel, []extraFields{{Key: "options", Values: binOptions}}, []string{asset.Name + "::" + asset.URL}, []string{sum}, "x86_64"),
 		Fields:      pkgbuild.Parse(src),
 		Fingerprint: ctx.Upstream.Fingerprint,
+		Note:        note,
 	}, nil
 }
 
@@ -125,7 +127,7 @@ type gitGen struct{}
 func (g *gitGen) Pkgname() string { return pkgGit }
 
 func (g *gitGen) Wanted() repo.Wanted {
-	return repo.Wanted{Repo: upstreamRepo, Branch: "main"}
+	return repo.Wanted{Repo: upstreamRepo, Branch: "main", RepoDescription: true}
 }
 
 func (g *gitGen) WithMaintainer(m string, _ conf.Overrides) repo.Generator {
@@ -161,7 +163,7 @@ func (g *gitGen) Render(ctx repo.Context) (repo.Generated, error) {
 		pkgrel = 1
 	}
 
-	desc := pkgdesc + " (git)"
+	desc, note := chooseDesc(ctx.Upstream)
 	var b strings.Builder
 	b.WriteString(commonHeader(pkgGit, ver, pkgrel, desc))
 	b.WriteString("makedepends=(" + quoteAll(gitMakedepends) + ")\n")
@@ -204,7 +206,7 @@ build() {
 
 package() {
   cp -a "$srcdir/package-root/usr" "$pkgdir/"
-}
+` + dropBundledAria2 + `}
 `)
 
 	src := b.String()
@@ -219,5 +221,6 @@ package() {
 			[]string{"SKIP"}, ""),
 		Fields:      pkgbuild.Parse(src),
 		Fingerprint: ctx.Upstream.Fingerprint,
+		Note:        note,
 	}, nil
 }

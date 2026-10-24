@@ -658,3 +658,182 @@ func TestLockIsReadFromPreparedCheckout(t *testing.T) {
 		t.Fatalf("skip must not publish, got %v", pub.done)
 	}
 }
+
+// TestPackageDefinitionChangeBumpsPkgrel covers the case that shipped a broken
+// package: the recipe gained a dependency while the version stayed the same, so
+// pkgrel had to move or already-installed users would never upgrade.
+func TestPackageDefinitionChangeBumpsPkgrel(t *testing.T) {
+	const task, pkgbase = "defchange-demo", "defchange-demo-pkg"
+	g := &fakeGen{pkgname: pkgbase, depends: []string{"glibc"}}
+	repo.Register(task, g)
+
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "conf.json")
+	cfg := `{"maintainer":"T <t@e.i>","packages":[{"task":"` + task + `"}]}`
+	if err := os.WriteFile(confPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "out")
+	deps := Deps{
+		Fetch:   &fakeFetcher{rel: github.Release{TagName: "v1.0.0", PublishedAt: "same"}},
+		Publish: &fakePublisher{},
+	}
+
+	if _, err := Run(Options{ConfPath: confPath, OutDir: outDir}, deps); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same upstream, different recipe.
+	g.depends = []string{"glibc", "aria2"}
+	results, err := Run(Options{ConfPath: confPath, OutDir: outDir}, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Action == "skip" {
+		t.Fatal("a recipe change must not be skipped")
+	}
+	lock, err := fsx.ReadLock(filepath.Join(outDir, pkgbase, "auto-aur.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock.Pkgrel != 2 {
+		t.Fatalf("pkgrel=%d want 2; installed users would never receive the fix", lock.Pkgrel)
+	}
+
+	// A third run with nothing changed must not keep bumping.
+	results, err = Run(Options{ConfPath: confPath, OutDir: outDir}, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Action != "skip" {
+		t.Fatalf("unchanged rerun should skip, got %q (%s)", results[0].Action, results[0].Reason)
+	}
+	lock, err = fsx.ReadLock(filepath.Join(outDir, pkgbase, "auto-aur.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock.Pkgrel != 2 {
+		t.Fatalf("pkgrel drifted to %d on an unchanged rerun", lock.Pkgrel)
+	}
+}
+
+// fakeRepos serves repository metadata.
+type fakeRepos struct {
+	description string
+	err         error
+}
+
+func (f *fakeRepos) RepoInfo(repo string) (*github.Repository, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &github.Repository{FullName: repo, Description: f.description}, nil
+}
+
+// descGen uses the upstream description as its pkgdesc.
+type descGen struct{ pkgname string }
+
+func (g *descGen) Pkgname() string { return g.pkgname }
+func (g *descGen) Wanted() repo.Wanted {
+	return repo.Wanted{Repo: "example/demo", RepoDescription: true}
+}
+func (g *descGen) Pkgver(up repo.Upstream) (string, error) { return up.Tag, nil }
+func (g *descGen) Render(ctx repo.Context) (repo.Generated, error) {
+	rel := ctx.Pkgrel
+	if rel == 0 {
+		rel = 1
+	}
+	desc := strings.Join(strings.Fields(ctx.Upstream.Description), " ")
+	if desc == "" {
+		desc = "fallback"
+	}
+	src := "pkgname=" + g.pkgname + "\npkgver=" + ctx.Upstream.Tag + "\npkgdesc=\"" + desc + "\"\n"
+	return repo.Generated{
+		Pkgname: g.pkgname, Pkgver: ctx.Upstream.Tag, Pkgrel: rel,
+		PKGBUILD:    src,
+		Srcinfo:     "pkgbase = " + g.pkgname + "\n\tpkgdesc = " + desc + "\n",
+		Fields:      pkgbuild.Parse(src),
+		Fingerprint: ctx.Upstream.Fingerprint,
+	}, nil
+}
+
+// TestDescriptionChangeBumpsPkgrel: the About text is a published field, so
+// changing it must reach existing installs.
+func TestDescriptionChangeBumpsPkgrel(t *testing.T) {
+	const task, pkgbase = "desc-demo", "desc-demo-pkg"
+	repo.Register(task, &descGen{pkgname: pkgbase})
+
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "conf.json")
+	cfg := `{"maintainer":"T <t@e.i>","packages":[{"task":"` + task + `"}]}`
+	if err := os.WriteFile(confPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "out")
+	repos := &fakeRepos{description: "first description"}
+	deps := Deps{
+		Fetch:   &fakeFetcher{rel: github.Release{TagName: "v1", PublishedAt: "same"}},
+		Repos:   repos,
+		Publish: &fakePublisher{},
+	}
+
+	if _, err := Run(Options{ConfPath: confPath, OutDir: outDir}, deps); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := fsx.ReadLock(filepath.Join(outDir, pkgbase, "auto-aur.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock.Pkgrel != 1 {
+		t.Fatalf("pkgrel=%d", lock.Pkgrel)
+	}
+
+	repos.description = "second description"
+	results, err := Run(Options{ConfPath: confPath, OutDir: outDir}, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Action == "skip" {
+		t.Fatal("a description change must not be skipped")
+	}
+	lock, err = fsx.ReadLock(filepath.Join(outDir, pkgbase, "auto-aur.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock.Pkgrel != 2 {
+		t.Fatalf("pkgrel=%d want 2 after an About change", lock.Pkgrel)
+	}
+	raw, err := os.ReadFile(filepath.Join(outDir, pkgbase, "PKGBUILD"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "second description") {
+		t.Fatalf("PKGBUILD still has the old description:\n%s", raw)
+	}
+}
+
+// TestDescriptionFetchFailureFailsTask: a silent fallback would look like a
+// recipe change and bump pkgrel for no reason.
+func TestDescriptionFetchFailureFailsTask(t *testing.T) {
+	const task, pkgbase = "desc-fail", "desc-fail-pkg"
+	repo.Register(task, &descGen{pkgname: pkgbase})
+
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "conf.json")
+	cfg := `{"maintainer":"T <t@e.i>","packages":[{"task":"` + task + `"}]}`
+	if err := os.WriteFile(confPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deps := Deps{
+		Fetch:   &fakeFetcher{rel: github.Release{TagName: "v1"}},
+		Repos:   &fakeRepos{err: os.ErrPermission},
+		Publish: &fakePublisher{},
+	}
+	results, err := Run(Options{ConfPath: confPath, OutDir: filepath.Join(dir, "out")}, deps)
+	if err == nil {
+		t.Fatal("expected the task to fail when the description cannot be read")
+	}
+	if results[0].Err == nil {
+		t.Fatal("result should carry the error")
+	}
+}

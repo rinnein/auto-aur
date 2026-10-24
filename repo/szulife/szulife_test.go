@@ -1,6 +1,9 @@
 package szulife
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -233,5 +236,147 @@ func TestGitSrcinfoUsesArchIndependentSource(t *testing.T) {
 	}
 	if !strings.Contains(gen.Srcinfo, "\tmakedepends = pnpm\n") {
 		t.Errorf("makedepends missing from SRCINFO:\n%s", gen.Srcinfo)
+	}
+}
+
+// TestBundledAria2cIsNotInstalled guards a real-world install failure:
+//
+//	your-szu-life-bin: filesystem conflict on /usr/bin/aria2c (owned by aria2)
+//
+// The .deb ships Debian's aria2c frontend, which links libaria2.so.0 that the
+// .deb does not include. Installing it both collides with the aria2 package and
+// cannot work on its own, so package() must delete it.
+func TestBundledAria2cIsNotInstalled(t *testing.T) {
+	up := repo.Upstream{
+		Tag:    "canary",
+		Commit: "572cce5eb41fbdfce9e27017e6183deed4cd624b",
+		Date:   "20261024",
+		Assets: canaryAssets(),
+	}
+	for name, g := range map[string]repo.Generator{
+		"bin": &binGen{},
+		"git": &gitGen{},
+	} {
+		gen, err := g.Render(repo.Context{Upstream: up, Net: testIO()})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !strings.Contains(gen.PKGBUILD, `rm -f "${pkgdir}/usr/bin/aria2c"`) {
+			t.Errorf("%s package() does not remove the bundled aria2c:\n%s", name, gen.PKGBUILD)
+		}
+		// The real aria2c must come from the aria2 package instead.
+		if !strings.Contains(gen.PKGBUILD, "'aria2'") {
+			t.Errorf("%s does not depend on aria2, so aria2c would be missing", name)
+		}
+		if !strings.Contains(gen.Srcinfo, "\tdepends = aria2\n") {
+			t.Errorf("%s SRCINFO lacks the aria2 dependency", name)
+		}
+	}
+}
+
+func TestQuotingSurvivesShell(t *testing.T) {
+	nasty := []string{
+		`泥深 - 你的SZU助手`,
+		`it's a "quoted" app`,
+		`costs $5 and ` + "`backtick`",
+		`back\slash and $HOME`,
+		`a&b | c; d`,
+	}
+	for _, d := range nasty {
+		gen, err := (&binGen{}).Render(repo.Context{
+			Upstream: repo.Upstream{Tag: "canary", Assets: canaryAssets(), Description: d},
+			Net:      testIO(),
+		})
+		if err != nil {
+			t.Fatalf("%q: %v", d, err)
+		}
+		dir := t.TempDir()
+		p := filepath.Join(dir, "PKGBUILD")
+		if err := os.WriteFile(p, []byte(gen.PKGBUILD), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command("bash", "-n", p).CombinedOutput()
+		if err != nil {
+			t.Errorf("PKGBUILD does not parse for %q: %v\n%s\n---\n%s", d, err, out, gen.PKGBUILD)
+			continue
+		}
+		// Syntax alone is not enough: the value must survive shell expansion
+		// byte for byte, otherwise $ and backticks would be substituted away.
+		got, err := exec.Command("bash", "-c",
+			`set -e; source "$1" >/dev/null 2>&1; printf '%s' "$pkgdesc"`, "bash", p).Output()
+		if err != nil {
+			t.Errorf("cannot source PKGBUILD for %q: %v", d, err)
+			continue
+		}
+		if want := sanitizeDesc(d); string(got) != want {
+			t.Errorf("pkgdesc round-trip mismatch\n got: %q\nwant: %q", string(got), want)
+		}
+	}
+}
+
+// TestPkgdescComesFromUpstream covers the requirement that the AUR description
+// is the repository's About text rather than a hardcoded string.
+func TestPkgdescComesFromUpstream(t *testing.T) {
+	const about = "泥深 - 你的SZU助手"
+	up := repo.Upstream{
+		Tag:         "canary",
+		Commit:      "572cce5eb41fbdfce9e27017e6183deed4cd624b",
+		Date:        "20261024",
+		Assets:      canaryAssets(),
+		Description: about,
+	}
+	for name, g := range map[string]repo.Generator{"bin": &binGen{}, "git": &gitGen{}} {
+		gen, err := g.Render(repo.Context{Upstream: up, Net: testIO()})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !strings.Contains(gen.PKGBUILD, `pkgdesc="`+about+`"`) {
+			t.Errorf("%s PKGBUILD does not carry the About text:\n%s", name, gen.PKGBUILD)
+		}
+		if !strings.Contains(gen.Srcinfo, "\tpkgdesc = "+about+"\n") {
+			t.Errorf("%s SRCINFO does not carry the About text:\n%s", name, gen.Srcinfo)
+		}
+	}
+}
+
+func TestPkgdescSanitisedToSingleLine(t *testing.T) {
+	gen, err := (&binGen{}).Render(repo.Context{
+		Upstream: repo.Upstream{Tag: "canary", Assets: canaryAssets(), Description: "line one\n  line two\ttabbed  "},
+		Net:      testIO(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A newline in pkgdesc would break both files.
+	if strings.Contains(gen.Fields.Pkgdesc, "\n") {
+		t.Fatalf("pkgdesc kept a newline: %q", gen.Fields.Pkgdesc)
+	}
+	if gen.Fields.Pkgdesc != "line one line two tabbed" {
+		t.Fatalf("pkgdesc=%q", gen.Fields.Pkgdesc)
+	}
+}
+
+func TestEmptyDescriptionFallsBack(t *testing.T) {
+	gen, err := (&binGen{}).Render(repo.Context{
+		Upstream: repo.Upstream{Tag: "canary", Assets: canaryAssets()},
+		Net:      testIO(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gen.Fields.Pkgdesc != fallbackPkgdesc {
+		t.Fatalf("pkgdesc=%q want %q", gen.Fields.Pkgdesc, fallbackPkgdesc)
+	}
+	// The fallback must be reported, not silent.
+	if gen.Note == "" {
+		t.Fatal("fallback description should be noted in the summary")
+	}
+}
+
+func TestWantedRequestsRepoDescription(t *testing.T) {
+	for name, g := range map[string]repo.Generator{"bin": &binGen{}, "git": &gitGen{}} {
+		if !g.Wanted().RepoDescription {
+			t.Errorf("%s does not request the repository description", name)
+		}
 	}
 }

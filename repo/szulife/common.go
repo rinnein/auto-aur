@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/rinnein/auto-aur/repo"
 )
 
 const (
@@ -32,8 +34,10 @@ const (
 	// virtualName is the name both packages provide.
 	virtualName = "your-szu-life"
 
-	pkgdesc = "Shenzhen University campus life application"
-	pkgURL  = "https://github.com/rinnein/your-szu-life"
+	// fallbackPkgdesc is used only when the repository's About description is
+	// empty; normally pkgdesc is the upstream "About" text, fetched each run.
+	fallbackPkgdesc = "Shenzhen University campus life application"
+	pkgURL          = "https://github.com/rinnein/your-szu-life"
 
 	// MIT per the repository LICENSE file. Upstream's own PKGBUILD says
 	// "unknown", which would fail AUR review.
@@ -41,7 +45,11 @@ const (
 
 	// Arch names for the libraries the Tauri webview needs. They mirror the
 	// Debian Depends of the prebuilt package.
-	depends = "libayatana-appindicator webkit2gtk-4.1 gtk3"
+	// aria2 is a hard dependency: the app shells out to aria2c (found via PATH
+	// or ARIA2C_PATH) for downloads. The .deb also ships its own aria2c, but
+	// that copy is Debian's dynamically linked frontend and clashes with the
+	// real /usr/bin/aria2c, so it is dropped in package().
+	depends = "libayatana-appindicator webkit2gtk-4.1 gtk3 aria2"
 )
 
 // binOptions apply to the prebuilt package. !strip keeps the shipped binary
@@ -74,6 +82,55 @@ func conflicts(self string) string {
 
 // AppimageVersion matches the version embedded in release asset filenames, e.g.
 // your-szu-life_linux_x64_0.10.0-release.deb.
+// dropBundledAria2 is shell shared by both package() functions.
+//
+// The Tauri build copies Debian's aria2c frontend into the .deb. That binary
+// links libaria2.so.0, which the .deb itself does not ship, and installing it
+// at /usr/bin/aria2c collides with the aria2 package:
+//
+//	your-szu-life-bin: filesystem conflict on /usr/bin/aria2c (owned by aria2)
+//
+// The app resolves aria2c through PATH (or ARIA2C_PATH) and the declared
+// dependency already puts the real binary there, so the bundled copy is
+// removed rather than installed.
+const dropBundledAria2 = `  # Drop the bundled aria2c: it collides with the aria2 package and needs a
+  # libaria2.so.0 that this package does not ship.
+  rm -f "${pkgdir}/usr/bin/aria2c"
+`
+
+// sanitizeDesc makes an arbitrary About description safe for pkgdesc.
+//
+// pkgdesc is a single line in both PKGBUILD and .SRCINFO, so whitespace runs
+// (including newlines) are collapsed.
+func sanitizeDesc(desc string) string {
+	return strings.Join(strings.Fields(desc), " ")
+}
+
+// chooseDesc returns the description to publish, falling back when upstream has
+// none set. The second return value explains the fallback for the run summary.
+func chooseDesc(up repo.Upstream) (string, string) {
+	if d := sanitizeDesc(up.Description); d != "" {
+		return d, ""
+	}
+	return fallbackPkgdesc, "repository has no About description; using the built-in default"
+}
+
+// bashDoubleQuote renders s as a double-quoted bash word.
+//
+// Double quotes are used rather than single quotes because the About text may
+// legitimately contain an apostrophe, which would terminate a single-quoted
+// string and break the PKGBUILD. Everything bash would otherwise expand inside
+// double quotes is escaped.
+func bashDoubleQuote(s string) string {
+	escaped := strings.NewReplacer(
+		"\\", "\\\\",
+		"\"", "\\\"",
+		"$", "\\$",
+		"`", "\\`",
+	).Replace(s)
+	return `"` + escaped + `"`
+}
+
 var assetVersion = regexp.MustCompile(`_([0-9]+(?:\.[0-9]+)*)-release\.`)
 
 // versionFromAsset extracts the version from a release asset filename.
@@ -92,7 +149,7 @@ func commonHeader(name, ver string, rel int, desc string) string {
 	fmt.Fprintf(&b, "pkgname=%s\n", name)
 	fmt.Fprintf(&b, "pkgver=%s\n", ver)
 	fmt.Fprintf(&b, "pkgrel=%d\n", rel)
-	fmt.Fprintf(&b, "pkgdesc='%s'\n", desc)
+	fmt.Fprintf(&b, "pkgdesc=%s\n", bashDoubleQuote(desc))
 	fmt.Fprintf(&b, "arch=('x86_64')\n")
 	fmt.Fprintf(&b, "url='%s'\n", pkgURL)
 	fmt.Fprintf(&b, "license=('%s')\n", licenseName)

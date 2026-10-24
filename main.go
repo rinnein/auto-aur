@@ -102,6 +102,7 @@ func runCommand(args []string) error {
 	deps := app.Deps{
 		Fetch:    gh,
 		Branches: gh,
+		Repos:    gh,
 		Lookup:   aur.NewClient(cfg.AUR.Host),
 		Publish:  publisher,
 		Checksum: app.HTTPChecksum(token),

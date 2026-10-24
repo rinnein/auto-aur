@@ -30,6 +30,28 @@ type Asset struct {
 	UpdatedAt          string `json:"updated_at"`
 }
 
+// Repository mirrors the fields of GET /repos/{owner}/{repo} that auto-aur
+// uses. Description is the "About" blurb shown on the repository page.
+type Repository struct {
+	FullName    string `json:"full_name"`
+	Description string `json:"description"`
+	Homepage    string `json:"homepage"`
+	Message     string `json:"message"`
+}
+
+// RepoInfo reads repository metadata, notably the About description.
+func (c *Client) RepoInfo(repo string) (*Repository, error) {
+	body, err := c.fetchRaw("/repos/" + repo)
+	if err != nil {
+		return nil, err
+	}
+	var r Repository
+	if err := json.Unmarshal(body, &r); err != nil {
+		return nil, fmt.Errorf("github: decode repo %s: %w", repo, err)
+	}
+	return &r, nil
+}
+
 // Commit identifies a branch head.
 type Commit struct {
 	SHA  string `json:"sha"`
