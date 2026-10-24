@@ -46,13 +46,13 @@ func TestDuplicateTaskRejected(t *testing.T) {
 }
 
 func TestDisabledReason(t *testing.T) {
-	c := &Config{Disabled: []string{"animeko-*", "exact"}}
+	c := &Config{Disabled: []string{"app-*", "exact"}}
 	cases := []struct {
 		task string
 		want bool
 	}{
-		{"animeko-beta", true},
-		{"animeko-alpha", true},
+		{"app-beta", true},
+		{"app-alpha", true},
 		{"exact", true},
 		{"other", false},
 	}
@@ -62,7 +62,7 @@ func TestDisabledReason(t *testing.T) {
 			t.Errorf("%s: disabled=%v want %v", tc.task, got, tc.want)
 		}
 	}
-	if c.DisabledReason(Package{Task: "animeko-beta", Disabled: true}) == "" {
+	if c.DisabledReason(Package{Task: "app-beta", Disabled: true}) == "" {
 		t.Error("per-package disabled flag ignored")
 	}
 }

@@ -1,6 +1,8 @@
 # auto-aur
 
-自动把 GitHub Release 发布到 AUR 的工具。用 Go 编写，由 GitHub Actions 定时驱动。
+自动把 GitHub Release 发布到 AUR 的框架。用 Go 编写，由 GitHub Actions 定时驱动。
+
+仓库本身**不包含任何具体软件包**（`packages` 为空、无可注册任务），只提供引擎；要发布什么，由你在 `repo/` 里按需加任务、在 `conf.json` 里启用。
 
 许可证仅适用于脚本本身，不适用于生成的 AUR 包。
 
@@ -18,10 +20,10 @@
 
 ```sh
 go build -o auto-aur .
-./auto-aur tasks            # 列出已注册的任务
+./auto-aur tasks            # 列出已注册的任务（当前为空）
 ./auto-aur run              # 跑 conf.json 里的全部启用任务
 ./auto-aur run -dry-run     # 只渲染并打印，不写文件、不推送
-./auto-aur run -only animeko -force -v
+./auto-aur run -only <task> -force -v
 ```
 
 `-force` 忽略 `auto-aur.lock.json`（等同于 workflow 里的 `force_update`）。`-no-create` 让缺失的 AUR 包直接失败而不是创建。
@@ -33,17 +35,13 @@ go build -o auto-aur .
   "maintainer": "Your Name <you@example.com>",
   "aur": { "host": "aur.archlinux.org", "user": "aur", "branch": "master" },
   "createOnMissing": true,
-  "packages": [
-    { "task": "animeko" },
-    { "task": "animeko-beta", "overrides": { "depends": ["vlc-plugin-ffmpeg", "gvfs"] } },
-    { "task": "animeko-alpha", "disabled": true }
-  ],
+  "packages": [],
   "disabled": []
 }
 ```
 
-- `packages` 决定要执行哪些任务，顺序即执行顺序。初始为空 —— 按需添加。
-- 禁用任务有两种写法：条目上 `"disabled": true`，或把任务名（支持 `*` 通配，如 `animeko-*`）放进顶层 `"disabled"`。被禁用的任务完全不碰 AUR。
+- `packages` 决定要执行哪些任务，顺序即执行顺序。**初始为空**，添加形如 `{ "task": "your-task" }` 的条目后才会真正工作。
+- 禁用任务有两种写法：条目上 `"disabled": true`，或把任务名（支持 `*` 通配，如 `app-*`）放进顶层 `"disabled"`。被禁用的任务完全不碰 AUR —— 不查询、不克隆、不渲染。
 - `overrides` 可覆盖 `pkgname` / `depends` / `conflicts` / `provides` / `pkgdesc` / `url` / `license` / `arch` / `options` / `pkgrel` / `disname` 等字段。
 - `aur` 段省略时使用上面的默认值，与 workflow 写入的 `~/.ssh/config` 一致。
 
@@ -56,26 +54,96 @@ go build -o auto-aur .
 
 ## 新增一个任务
 
-任务的生成逻辑在 `repo/`，注册表在 `repo/gen.go`。加一个 Animeko 频道只需新建一个文件：
+实现 `repo.Generator` 接口，并在 `init()` 里注册。新建目录 `repo/<你的包>/`：
 
 ```go
-package animeko
+package mypkg
 
-import "github.com/rinnein/auto-aur/repo"
+import (
+    "github.com/rinnein/auto-aur/internal/pkgbuild"
+    "github.com/rinnein/auto-aur/repo"
+)
 
-func init() {
-    repo.Register("my-channel", New(Channel{
-        Task:    "my-channel",
-        Pkgname: "animeko-appimage-nightly",
-        Search:  "nightly",
-        Disname: "Animeko Nightly",
-        Depends: previewDeps,
-        IconDir: "512x512",
-    }))
+func init() { repo.Register("my-task", &Generator{}) }
+
+type Generator struct{}
+
+func (g *Generator) Pkgname() string { return "my-package-bin" }
+
+func (g *Generator) Wanted() repo.Wanted {
+    return repo.Wanted{Repo: "owner/project"} // Search/Tag 可选
 }
+
+func (g *Generator) Render(rel repo.Release, sum repo.Checksum) (repo.Generated, error) {
+    digest, err := sum("https://example.com/SHA1SUMS") // 取校验和内容
+    if err != nil {
+        return repo.Generated{}, err
+    }
+    src, err := pkgbuild.Render(pkgbuild.Data{
+        Maintainer: "Your Name <you@example.com>",
+        Pkgname:    "my-package-bin",
+        PkgnameIn:  "mypkg",
+        Appimage:   "mypkg-" + rel.TagName + "-linux-x86_64.appimage",
+        Pkgver:     rel.TagName,
+        Pkgrel:     1,
+        Pkgdesc:    "example",
+        URL:        "https://example.com",
+        License:    []string{"MIT"},
+        Arch:       []string{"x86_64"},
+        Depends:    []string{"glibc"},
+        Provides:   []string{"mypkg"},
+        Options:    []string{"!strip"},
+        SourceURL:  "https://example.com/mypkg.appimage",
+        SHA1:       digest,
+        IconDir:    "512x512",
+    })
+    if err != nil {
+        return repo.Generated{}, err
+    }
+    return repo.Generated{
+        Pkgname:  "my-package-bin",
+        Pkgver:   rel.TagName,
+        Pkgrel:   1,
+        PKGBUILD: src,
+        Fields:   pkgbuild.Parse(src), // 供“元数据变更也需重发”检测
+        Source:   "mypkg::https://example.com/mypkg.appimage",
+        SHA1:     digest,
+    }, nil
+}
+
+func (g *Generator) Srcinfo(gen repo.Generated) string { /* 组装 .SRCINFO */ }
 ```
 
-然后在 `conf.json` 的 `packages` 里加上 `{ "task": "my-channel" }`。其他软件需要新模板时实现 `repo.Generator` 接口即可。
+然后在 `main.go` 里加一行 blank import：
+
+```go
+_ "github.com/rinnein/auto-aur/repo/mypkg"
+```
+
+最后在 `conf.json` 的 `packages` 里加上 `{ "task": "my-task" }`。
+
+若想让任务支持 `conf.json` 的 `overrides`，额外实现：
+
+```go
+func (g *Generator) WithMaintainer(m string, o conf.Overrides) repo.Generator
+```
+
+`pkgbuild.Render` 内置的模板面向 AppImage 形态的包（`prepare/build/package` 三段、desktop 与图标安装）；其他形态的包直接自己拼 PKGBUILD 文本即可，`repo.Generated` 只要求最终的字符串和解析后的字段。
+
+## 目录结构
+
+```
+main.go              CLI 入口
+conf.json            任务配置
+repo/               任务注册表与 Generator 接口（不含具体包）
+internal/conf/      配置加载、校验、禁用判定
+internal/github/    release 读取
+internal/pkgbuild/  PKGBUILD 渲染与字段解析
+internal/aur/       RPC 查询 + 包仓库克隆/创建/推送
+internal/gitx/      git 调用封装
+internal/fsx/       文件与 lock 读写
+internal/app/       编排、发布、update.sh 生成
+```
 
 ## 开发
 

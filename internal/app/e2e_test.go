@@ -11,6 +11,7 @@ import (
 
 	"github.com/rinnein/auto-aur/internal/aur"
 	"github.com/rinnein/auto-aur/internal/github"
+	"github.com/rinnein/auto-aur/repo"
 )
 
 func runGit(t *testing.T, dir string, args ...string) string {
@@ -25,27 +26,23 @@ func runGit(t *testing.T, dir string, args ...string) string {
 	return string(out)
 }
 
-func releaseFor(tag string) github.Release {
-	base := "ani-" + tag
-	return github.Release{
-		TagName: tag,
-		Assets: []github.Asset{
-			{Name: base + "-linux-x86_64.appimage", BrowserDownloadURL: "https://e/" + base + ".appimage"},
-			{Name: base + "-linux-x86_64.appimage.sha1", BrowserDownloadURL: "https://e/" + base + ".sha1"},
-		},
-	}
-}
+// rpcHit is the AUR RPC answer for a package that exists; PKGBASE is
+// substituted so one fixture serves any package name.
+const rpcHit = `{"resultcount":1,"results":[{"Name":"PKGBASE","Version":"1-1"}],"type":"multiinfo","version":5}`
 
 // TestE2ECreateThenUpdate drives the real publisher against a local bare
-// repository standing in for the AUR, with an RPC server that tracks whether
-// the package exists. It covers the requirement "create the package when the
-// AUR does not have it yet" end to end.
+// repository standing in for the AUR, with an RPC server that flips to
+// "exists" once the repository has refs. It covers the requirement "create the
+// package when the AUR does not have it yet", end to end.
 func TestE2ECreateThenUpdate(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git missing")
 	}
+	const task, pkgbase = "e2e-demo", "e2e-demo-bin"
+	repo.Register(task, &overridableGen{pkgname: pkgbase})
+
 	root := t.TempDir()
-	remoteDir := filepath.Join(root, "animeko-appimage-beta.git")
+	remoteDir := filepath.Join(root, pkgbase+".git")
 	if err := os.MkdirAll(remoteDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +55,7 @@ func TestE2ECreateThenUpdate(t *testing.T) {
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if refs() {
-			_, _ = w.Write([]byte(`{"resultcount":1,"results":[{"Name":"animeko-appimage-beta","Version":"1-1"}],"type":"multiinfo","version":5}`))
+			_, _ = w.Write([]byte(strings.Replace(rpcHit, "PKGBASE", pkgbase, 1)))
 			return
 		}
 		_, _ = w.Write([]byte(`{"resultcount":0,"results":[],"type":"multiinfo","version":5}`))
@@ -67,25 +64,27 @@ func TestE2ECreateThenUpdate(t *testing.T) {
 
 	dir := t.TempDir()
 	confPath := filepath.Join(dir, "conf.json")
-	if err := os.WriteFile(confPath, []byte(`{"maintainer":"Alice <alice@example.invalid>","packages":[{"task":"animeko-beta"}]}`), 0o644); err != nil {
+	cfgBody := `{"maintainer":"Alice <alice@example.invalid>","packages":[{"task":"` + task + `"}]}`
+	if err := os.WriteFile(confPath, []byte(cfgBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	outDir := filepath.Join(dir, "out")
 
 	pub := &AURPublisher{
-		OutDir: filepath.Join(dir, "out"),
+		OutDir: outDir,
 		Remote: aur.Remote{Host: "localhost", User: "aur", Branch: "master", BaseURL: root},
 		Name:   "Alice",
-		Email:  "redacted-af28a3c2c6ea@private.invalid",
+		Email:  "alice@example.invalid",
 	}
 	pub.RPCBaseURL = srv.URL
 
 	deps := Deps{
-		Fetch:    &fakeFetcher{rel: releaseFor("v1.0.0")},
+		Fetch:    &fakeFetcher{rel: github.Release{TagName: "v1.0.0"}},
 		Publish:  pub,
 		Checksum: func(string) (string, error) { return "0123456789abcdef0123456789abcdef01234567", nil },
 	}
 
-	res, err := Run(Options{ConfPath: confPath, OutDir: filepath.Join(dir, "out")}, deps)
+	res, err := Run(Options{ConfPath: confPath, OutDir: outDir}, deps)
 	if err != nil {
 		t.Fatalf("first run: %v (%+v)", err, res)
 	}
@@ -97,8 +96,8 @@ func TestE2ECreateThenUpdate(t *testing.T) {
 	}
 
 	// A second run with a newer upstream release must update in place.
-	deps.Fetch = &fakeFetcher{rel: releaseFor("v2.0.0")}
-	res, err = Run(Options{ConfPath: confPath, OutDir: filepath.Join(dir, "out")}, deps)
+	deps.Fetch = &fakeFetcher{rel: github.Release{TagName: "v2.0.0"}}
+	res, err = Run(Options{ConfPath: confPath, OutDir: outDir}, deps)
 	if err != nil {
 		t.Fatalf("second run: %v (%+v)", err, res)
 	}
@@ -111,9 +110,9 @@ func TestE2ECreateThenUpdate(t *testing.T) {
 		t.Fatalf("remote PKGBUILD not updated:\n%s", remotePkgbuild)
 	}
 	if !strings.Contains(remotePkgbuild, "# Maintainer: Alice <alice@example.invalid>") {
-		t.Fatalf("maintainer missing on remote:\n%s", strings.SplitN(remotePkgbuild, "\n", 4)[0])
+		t.Fatalf("maintainer missing on remote:\n%s", remotePkgbuild)
 	}
-	script, err := os.ReadFile(filepath.Join(dir, "out", "update.sh"))
+	script, err := os.ReadFile(filepath.Join(outDir, "update.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}

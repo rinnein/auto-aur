@@ -17,7 +17,6 @@ import (
 	"github.com/rinnein/auto-aur/internal/conf"
 	"github.com/rinnein/auto-aur/internal/github"
 	"github.com/rinnein/auto-aur/repo"
-	_ "github.com/rinnein/auto-aur/repo/animeko" // register tasks
 )
 
 const usage = `auto-aur - publish GitHub releases to the AUR

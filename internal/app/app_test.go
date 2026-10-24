@@ -11,7 +11,6 @@ import (
 	"github.com/rinnein/auto-aur/internal/github"
 	"github.com/rinnein/auto-aur/internal/pkgbuild"
 	"github.com/rinnein/auto-aur/repo"
-	_ "github.com/rinnein/auto-aur/repo/animeko" // real tasks for regression tests
 )
 
 // fakeGen is a minimal task, so the app tests do not depend on a real upstream.
@@ -334,25 +333,82 @@ func TestOverridesApply(t *testing.T) {
 
 func strptr(s string) *string { return &s }
 
-// TestMaintainerReachesPKGBUILD guards a refactor hazard: WithOverrides
+// overridableGen renders through the real PKGBUILD template and accepts
+// conf.json overrides, so tests can exercise the full path without shipping a
+// concrete task in the repository.
+type overridableGen struct {
+	pkgname    string
+	maintainer string
+}
+
+func (g *overridableGen) Pkgname() string { return g.pkgname }
+
+func (g *overridableGen) Wanted() repo.Wanted { return repo.Wanted{Repo: "example/demo"} }
+
+func (g *overridableGen) WithMaintainer(m string, o conf.Overrides) repo.Generator {
+	cp := *g
+	cp.maintainer = m
+	if o.Pkgname != nil {
+		cp.pkgname = *o.Pkgname
+	}
+	return &cp
+}
+
+func (g *overridableGen) Render(rel repo.Release, sum repo.Checksum) (repo.Generated, error) {
+	digest, err := sum("https://example.invalid/demo.sha1")
+	if err != nil {
+		return repo.Generated{}, err
+	}
+	src, err := pkgbuild.Render(pkgbuild.Data{
+		Maintainer: g.maintainer,
+		Pkgname:    g.pkgname,
+		PkgnameIn:  "demo",
+		Appimage:   "demo-" + rel.TagName + "-linux-x86_64.appimage",
+		Pkgver:     strings.ReplaceAll(rel.TagName, "-", "_"),
+		Pkgrel:     1,
+		Pkgdesc:    "demo package",
+		URL:        "https://example.invalid",
+		License:    []string{"MIT"},
+		Depends:    []string{"glibc"},
+		Provides:   []string{"demo"},
+		Options:    []string{"!strip"},
+		SourceURL:  "https://example.invalid/demo.appimage",
+		SHA1:       digest,
+		IconDir:    "512x512",
+	})
+	if err != nil {
+		return repo.Generated{}, err
+	}
+	return repo.Generated{
+		Pkgname:  g.pkgname,
+		Pkgver:   strings.ReplaceAll(rel.TagName, "-", "_"),
+		Pkgrel:   1,
+		PKGBUILD: src,
+		Fields:   pkgbuild.Parse(src),
+		Source:   "demo-" + rel.TagName + "-linux-x86_64.appimage::https://example.invalid/demo.appimage",
+		SHA1:     digest,
+	}, nil
+}
+
+func (g *overridableGen) Srcinfo(gen repo.Generated) string {
+	return "pkgbase = " + gen.Pkgname + "\n\tpkgver = " + gen.Pkgver + "\n\npkgname = " + gen.Pkgname + "\n"
+}
+
+// TestMaintainerReachesPKGBUILD guards a refactor hazard: WithOverrides once
 // returned the generator struct by value, so the configured maintainer was
 // silently dropped from every rendered file.
 func TestMaintainerReachesPKGBUILD(t *testing.T) {
+	const task, pkgbase = "maint-demo", "maint-demo-pkg"
+	repo.Register(task, &overridableGen{pkgname: pkgbase})
+
 	dir := t.TempDir()
 	confPath := filepath.Join(dir, "conf.json")
-	cfg := `{"maintainer":"Alice <alice@example.invalid>","packages":[{"task":"animeko-beta"}]}`
+	cfg := `{"maintainer":"Alice <alice@example.invalid>","packages":[{"task":"` + task + `"}]}`
 	if err := os.WriteFile(confPath, []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rel := github.Release{
-		TagName: "v1.0.0",
-		Assets: []github.Asset{
-			{Name: "ani-1.0.0-linux-x86_64.appimage", BrowserDownloadURL: "https://e/a.appimage"},
-			{Name: "ani-1.0.0-linux-x86_64.appimage.sha1", BrowserDownloadURL: "https://e/a.sha1"},
-		},
-	}
 	deps := Deps{
-		Fetch:    &fakeFetcher{rel: rel},
+		Fetch:    &fakeFetcher{rel: github.Release{TagName: "v1.0.0"}},
 		Publish:  &fakePublisher{},
 		Checksum: func(string) (string, error) { return "0123456789abcdef0123456789abcdef01234567", nil },
 	}
@@ -360,7 +416,7 @@ func TestMaintainerReachesPKGBUILD(t *testing.T) {
 	if _, err := Run(Options{ConfPath: confPath, OutDir: outDir}, deps); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(filepath.Join(outDir, "animeko-appimage-beta", "PKGBUILD"))
+	raw, err := os.ReadFile(filepath.Join(outDir, pkgbase, "PKGBUILD"))
 	if err != nil {
 		t.Fatal(err)
 	}
