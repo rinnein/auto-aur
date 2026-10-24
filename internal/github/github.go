@@ -13,17 +13,31 @@ import (
 
 // Release mirrors the fields auto-aur consumes from the GitHub REST API.
 type Release struct {
-	TagName string  `json:"tag_name"`
-	Name    string  `json:"name"`
-	Assets  []Asset `json:"assets"`
-	Message string  `json:"message"` // populated by API error responses
+	TagName     string  `json:"tag_name"`
+	Name        string  `json:"name"`
+	PublishedAt string  `json:"published_at"`
+	Body        string  `json:"body"`
+	Assets      []Asset `json:"assets"`
+	Message     string  `json:"message"` // populated by API error responses
 }
 
 // Asset is a downloadable release artefact.
 type Asset struct {
+	ID                 int64  `json:"id"`
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
 	Size               int64  `json:"size"`
+	UpdatedAt          string `json:"updated_at"`
+}
+
+// Commit identifies a branch head.
+type Commit struct {
+	SHA  string `json:"sha"`
+	Info struct {
+		Committer struct {
+			Date string `json:"date"`
+		} `json:"committer"`
+	} `json:"commit"`
 }
 
 // Client talks to api.github.com. Token is optional but strongly recommended:
@@ -56,6 +70,23 @@ type Wanted struct {
 
 // ErrRateLimited reports an exhausted API quota.
 var ErrRateLimited = fmt.Errorf("github: API rate limit exceeded; set GH_TOKEN or GITHUB_TOKEN")
+
+// BranchHead returns the head commit of branch. VCS packages use it instead of
+// a release, and its SHA doubles as the change fingerprint.
+func (c *Client) BranchHead(repo, branch string) (*Commit, error) {
+	body, err := c.fetchRaw(fmt.Sprintf("/repos/%s/commits/%s", repo, branch))
+	if err != nil {
+		return nil, err
+	}
+	var commit Commit
+	if err := json.Unmarshal(body, &commit); err != nil {
+		return nil, fmt.Errorf("github: decode commit %s@%s: %w", repo, branch, err)
+	}
+	if commit.SHA == "" {
+		return nil, fmt.Errorf("github: no commit returned for %s@%s", repo, branch)
+	}
+	return &commit, nil
+}
 
 // Fetch resolves spec to a release and normalises it: substitutions are left to
 // the caller so this package stays free of packaging policy.

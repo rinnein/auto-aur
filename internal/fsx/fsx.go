@@ -11,32 +11,47 @@ import (
 	"path/filepath"
 )
 
-// LockFile is the on-disk shape of auto-aur.lock.json. It stays a single-key
-// object for backward compatibility with lock files committed by the previous
-// TypeScript implementation.
+// LockFile is the on-disk shape of auto-aur.lock.json.
+//
+// Pkgver is the only field older versions wrote; Pkgrel and Fingerprint are
+// additive so a lock file from an earlier release still loads.
 type LockFile struct {
 	Pkgver string `json:"pkgver"`
+	// Pkgrel is bumped when upstream content changes without a version change.
+	Pkgrel int `json:"pkgrel,omitempty"`
+	// Fingerprint identifies the upstream state the files were generated from.
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
-// ReadLock returns the recorded pkgver, or "" when the file is absent.
-func ReadLock(path string) (string, error) {
+// MarshalLock renders a lock record as JSON with a trailing newline.
+func MarshalLock(lf LockFile) (string, error) {
+	raw, err := json.MarshalIndent(lf, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal lock file: %w", err)
+	}
+	return string(raw) + "\n", nil
+}
+
+// ReadLock returns the recorded lock record, or the zero value when the file is
+// absent.
+func ReadLock(path string) (LockFile, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return "", nil
+			return LockFile{}, nil
 		}
-		return "", fmt.Errorf("read %s: %w", path, err)
+		return LockFile{}, fmt.Errorf("read %s: %w", path, err)
 	}
 	var lf LockFile
 	if err := json.Unmarshal(raw, &lf); err != nil {
-		return "", fmt.Errorf("parse %s: %w", path, err)
+		return LockFile{}, fmt.Errorf("parse %s: %w", path, err)
 	}
-	return lf.Pkgver, nil
+	return lf, nil
 }
 
-// WriteLock persists pkgver, creating parent directories as needed.
-func WriteLock(path, pkgver string) error {
-	return WriteJSON(path, LockFile{Pkgver: pkgver})
+// WriteLock persists lf, creating parent directories as needed.
+func WriteLock(path string, lf LockFile) error {
+	return WriteJSON(path, lf)
 }
 
 // WriteJSON writes v as indented JSON, creating parent directories.

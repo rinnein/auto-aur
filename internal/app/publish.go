@@ -1,7 +1,11 @@
 package app
 
 import (
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"os"
@@ -135,5 +139,44 @@ func HTTPChecksum(token string) repo.Checksum {
 			return "", err
 		}
 		return string(body), nil
+	}
+}
+
+// HTTPDigest streams an asset and returns its hex digest.
+//
+// Release assets live behind redirects to storage hosts, which must not receive
+// the API token, so Authorization is only attached to the API host. The body is
+// hashed while streaming: a 40 MB .deb is never held in memory.
+func HTTPDigest(token string) repo.Digest {
+	client := &http.Client{Timeout: 30 * time.Minute}
+	return func(url, algo string) (string, error) {
+		var h hash.Hash
+		switch algo {
+		case "sha256":
+			h = sha256.New()
+		case "sha1":
+			h = sha1.New()
+		default:
+			return "", fmt.Errorf("unsupported digest %q", algo)
+		}
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			return "", err
+		}
+		if token != "" && strings.HasPrefix(url, "https://api.github.com/") {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("GET %s: %s", url, resp.Status)
+		}
+		if _, err := io.Copy(h, resp.Body); err != nil {
+			return "", fmt.Errorf("read %s: %w", url, err)
+		}
+		return hex.EncodeToString(h.Sum(nil)), nil
 	}
 }

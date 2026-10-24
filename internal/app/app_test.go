@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/rinnein/auto-aur/internal/aur"
 	"github.com/rinnein/auto-aur/internal/conf"
+	"github.com/rinnein/auto-aur/internal/fsx"
 	"github.com/rinnein/auto-aur/internal/github"
 	"github.com/rinnein/auto-aur/internal/pkgbuild"
 	"github.com/rinnein/auto-aur/repo"
@@ -28,13 +30,25 @@ func (f *fakeGen) Pkgname() string { return f.pkgname }
 func (f *fakeGen) Wanted() repo.Wanted {
 	return repo.Wanted{Repo: "example/demo"}
 }
-func (f *fakeGen) Render(rel repo.Release, _ repo.Checksum) (repo.Generated, error) {
+func (f *fakeGen) Pkgver(up repo.Upstream) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	return strings.ReplaceAll(up.Tag, "-", "_"), nil
+}
+
+func (f *fakeGen) Render(ctx repo.Context) (repo.Generated, error) {
 	f.renders++
 	if f.err != nil {
 		return repo.Generated{}, f.err
 	}
+	ver := strings.ReplaceAll(ctx.Upstream.Tag, "-", "_")
+	pkgrel := ctx.Pkgrel
+	if pkgrel == 0 {
+		pkgrel = 1
+	}
 	// pkgver comes from upstream, exactly like a real task.
-	src := "pkgname=" + f.pkgname + "\npkgver=" + strings.ReplaceAll(rel.TagName, "-", "_") + "\ndepends=("
+	src := "pkgname=" + f.pkgname + "\npkgver=" + ver + "\ndepends=("
 	for i, d := range f.depends {
 		if i > 0 {
 			src += " "
@@ -44,21 +58,19 @@ func (f *fakeGen) Render(rel repo.Release, _ repo.Checksum) (repo.Generated, err
 	src += ")\n"
 	return repo.Generated{
 		Pkgname:  f.pkgname,
-		Pkgver:   strings.ReplaceAll(rel.TagName, "-", "_"),
+		Pkgver:   ver,
+		Pkgrel:   pkgrel,
 		PKGBUILD: src,
 		// Fields must mirror PKGBUILD; the app compares them to detect edits
 		// that do not change the version.
 		Fields: pkgbuild.Fields{
 			Pkgname: f.pkgname,
-			Pkgver:  strings.ReplaceAll(rel.TagName, "-", "_"),
+			Pkgver:  ver,
 			Depends: append([]string{}, f.depends...),
 		},
-		Source: "demo::https://example.invalid/demo.appimage",
-		SHA1:   "abc123",
+		Srcinfo:     "pkgbase = " + f.pkgname + "\n\tpkgver = " + ver + "\n",
+		Fingerprint: ctx.Upstream.Fingerprint,
 	}, nil
-}
-func (f *fakeGen) Srcinfo(g repo.Generated) string {
-	return "pkgbase = " + g.Pkgname + "\n\tpkgver = " + g.Pkgver + "\n"
 }
 
 type fakeFetcher struct {
@@ -354,8 +366,17 @@ func (g *overridableGen) WithMaintainer(m string, o conf.Overrides) repo.Generat
 	return &cp
 }
 
-func (g *overridableGen) Render(rel repo.Release, sum repo.Checksum) (repo.Generated, error) {
-	digest, err := sum("https://example.invalid/demo.sha1")
+func (g *overridableGen) Pkgver(up repo.Upstream) (string, error) {
+	return strings.ReplaceAll(up.Tag, "-", "_"), nil
+}
+
+func (g *overridableGen) Render(ctx repo.Context) (repo.Generated, error) {
+	ver := strings.ReplaceAll(ctx.Upstream.Tag, "-", "_")
+	pkgrel := ctx.Pkgrel
+	if pkgrel == 0 {
+		pkgrel = 1
+	}
+	digest, err := ctx.Net.Checksum("https://example.invalid/demo.sha1")
 	if err != nil {
 		return repo.Generated{}, err
 	}
@@ -363,9 +384,9 @@ func (g *overridableGen) Render(rel repo.Release, sum repo.Checksum) (repo.Gener
 		Maintainer: g.maintainer,
 		Pkgname:    g.pkgname,
 		PkgnameIn:  "demo",
-		Appimage:   "demo-" + rel.TagName + "-linux-x86_64.appimage",
-		Pkgver:     strings.ReplaceAll(rel.TagName, "-", "_"),
-		Pkgrel:     1,
+		Appimage:   "demo-" + ctx.Upstream.Tag + "-linux-x86_64.appimage",
+		Pkgver:     ver,
+		Pkgrel:     pkgrel,
 		Pkgdesc:    "demo package",
 		URL:        "https://example.invalid",
 		License:    []string{"MIT"},
@@ -380,18 +401,14 @@ func (g *overridableGen) Render(rel repo.Release, sum repo.Checksum) (repo.Gener
 		return repo.Generated{}, err
 	}
 	return repo.Generated{
-		Pkgname:  g.pkgname,
-		Pkgver:   strings.ReplaceAll(rel.TagName, "-", "_"),
-		Pkgrel:   1,
-		PKGBUILD: src,
-		Fields:   pkgbuild.Parse(src),
-		Source:   "demo-" + rel.TagName + "-linux-x86_64.appimage::https://example.invalid/demo.appimage",
-		SHA1:     digest,
+		Pkgname:     g.pkgname,
+		Pkgver:      ver,
+		Pkgrel:      pkgrel,
+		PKGBUILD:    src,
+		Srcinfo:     "pkgbase = " + g.pkgname + "\n\tpkgver = " + ver + "\n",
+		Fields:      pkgbuild.Parse(src),
+		Fingerprint: ctx.Upstream.Fingerprint,
 	}, nil
-}
-
-func (g *overridableGen) Srcinfo(gen repo.Generated) string {
-	return "pkgbase = " + gen.Pkgname + "\n\tpkgver = " + gen.Pkgver + "\n\npkgname = " + gen.Pkgname + "\n"
 }
 
 // TestMaintainerReachesPKGBUILD guards a refactor hazard: WithOverrides once
@@ -424,3 +441,146 @@ func TestMaintainerReachesPKGBUILD(t *testing.T) {
 		t.Fatalf("maintainer missing from PKGBUILD:\n%s", raw)
 	}
 }
+
+// fakeBranches stands in for the GitHub branch endpoint.
+type fakeBranches struct {
+	sha  string
+	date string
+	err  error
+}
+
+func (f *fakeBranches) BranchHead(repo, branch string) (*github.Commit, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	c := &github.Commit{SHA: f.sha}
+	c.Info.Committer.Date = f.date
+	return c, nil
+}
+
+// branchGen renders a version from a tracked branch, like a -git package.
+type branchGen struct{ pkgname string }
+
+func (g *branchGen) Pkgname() string { return g.pkgname }
+func (g *branchGen) Wanted() repo.Wanted {
+	return repo.Wanted{Repo: "example/demo", Branch: "main"}
+}
+func (g *branchGen) Pkgver(up repo.Upstream) (string, error) {
+	if up.Commit == "" {
+		return "", fmt.Errorf("no commit")
+	}
+	return up.Date + ".r" + up.Commit[:7], nil
+}
+func (g *branchGen) Render(ctx repo.Context) (repo.Generated, error) {
+	ver, err := g.Pkgver(ctx.Upstream)
+	if err != nil {
+		return repo.Generated{}, err
+	}
+	rel := ctx.Pkgrel
+	if rel == 0 {
+		rel = 1
+	}
+	src := "pkgname=" + g.pkgname + "\npkgver=" + ver + "\ndepends=('glibc')\n"
+	return repo.Generated{
+		Pkgname: g.pkgname, Pkgver: ver, Pkgrel: rel,
+		PKGBUILD:    src,
+		Srcinfo:     "pkgbase = " + g.pkgname + "\n",
+		Fields:      pkgbuild.Parse(src),
+		Fingerprint: ctx.Upstream.Fingerprint,
+	}, nil
+}
+
+func TestBranchModeTracksCommits(t *testing.T) {
+	const task, pkgbase = "branch-demo", "branch-demo-pkg"
+	repo.Register(task, &branchGen{pkgname: pkgbase})
+
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "conf.json")
+	cfg := `{"maintainer":"T <t@e.i>","packages":[{"task":"` + task + `"}]}`
+	if err := os.WriteFile(confPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "out")
+	branches := &fakeBranches{sha: "572cce5eb41fbdfce9e27017e6183deed4cd624b", date: "2026-10-24T07:05:27Z"}
+	pub := &fakePublisher{}
+	deps := Deps{Branches: branches, Publish: pub}
+
+	results, err := Run(Options{ConfPath: confPath, OutDir: outDir}, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := results[0].Pkgver; got != "20261024.r572cce5" {
+		t.Fatalf("pkgver=%q", got)
+	}
+
+	// A new commit must republish with a new version.
+	branches.sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+	results, err = Run(Options{ConfPath: confPath, OutDir: outDir}, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Action == "skip" {
+		t.Fatal("a new upstream commit must not be skipped")
+	}
+	if results[0].Pkgver == "20261024.r572cce5" {
+		t.Fatalf("version did not move: %q", results[0].Pkgver)
+	}
+
+	// Unchanged commit must skip.
+	branches.sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+	results, err = Run(Options{ConfPath: confPath, OutDir: outDir}, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Action != "skip" {
+		t.Fatalf("unchanged commit should skip, got %q (%s)", results[0].Action, results[0].Reason)
+	}
+}
+
+// TestRebuiltAssetBumpsPkgrel covers a rolling release whose version string is
+// stable but whose payload changes: without a pkgrel bump pacman would consider
+// the package up to date.
+func TestRebuiltAssetBumpsPkgrel(t *testing.T) {
+	const task, pkgbase = "rebuild-demo", "rebuild-demo-pkg"
+	repo.Register(task, &fakeGen{pkgname: pkgbase})
+
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "conf.json")
+	cfg := `{"maintainer":"T <t@e.i>","packages":[{"task":"` + task + `"}]}`
+	if err := os.WriteFile(confPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "out")
+	fetch := &fakeFetcher{rel: github.Release{TagName: "v1.0.0", PublishedAt: "2026-10-10T17:18:03Z"}}
+	deps := Deps{Fetch: fetch, Publish: &fakePublisher{}}
+
+	if _, err := Run(Options{ConfPath: confPath, OutDir: outDir}, deps); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := fsxReadLock(filepath.Join(outDir, pkgbase, "auto-aur.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock.Pkgrel != 1 {
+		t.Fatalf("initial pkgrel=%d want 1", lock.Pkgrel)
+	}
+
+	// Same version, republished release: pkgrel must move to 2.
+	fetch.rel.PublishedAt = "2026-10-24T07:05:34Z"
+	if _, err := Run(Options{ConfPath: confPath, OutDir: outDir}, deps); err != nil {
+		t.Fatal(err)
+	}
+	lock, err = fsxReadLock(filepath.Join(outDir, pkgbase, "auto-aur.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock.Pkgrel != 2 {
+		t.Fatalf("pkgrel=%d want 2 after a republished release", lock.Pkgrel)
+	}
+	if lock.Pkgver != "v1.0.0" {
+		t.Fatalf("pkgver changed unexpectedly: %q", lock.Pkgver)
+	}
+}
+
+// fsxReadLock keeps the lock assertions readable.
+func fsxReadLock(path string) (fsx.LockFile, error) { return fsx.ReadLock(path) }

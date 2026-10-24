@@ -6,6 +6,9 @@
     "branch": "master"
   },
   "createOnMissing": true,
-  "packages": [],
+  "packages": [
+    { "task": "your-szu-life-bin" },
+    { "task": "your-szu-life-git" }
+  ],
   "disabled": []
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/rinnein/auto-aur/internal/conf"
 	"github.com/rinnein/auto-aur/internal/github"
 	"github.com/rinnein/auto-aur/repo"
+	_ "github.com/rinnein/auto-aur/repo/szulife" // register tasks
 )
 
 const usage = `auto-aur - publish GitHub releases to the AUR
@@ -97,11 +98,14 @@ func runCommand(args []string) error {
 	}
 
 	token := githubToken()
+	gh := github.New(token)
 	deps := app.Deps{
-		Fetch:    github.New(token),
+		Fetch:    gh,
+		Branches: gh,
 		Lookup:   aur.NewClient(cfg.AUR.Host),
 		Publish:  publisher,
 		Checksum: app.HTTPChecksum(token),
+		Digest:   app.HTTPDigest(token),
 		Log:      logf,
 	}
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/rinnein/auto-aur/internal/aur"
 	"github.com/rinnein/auto-aur/internal/conf"
@@ -34,6 +35,11 @@ type Fetcher interface {
 	Fetch(spec github.Wanted) (*github.Release, error)
 }
 
+// BranchReader resolves a branch head, used by VCS (-git) tasks.
+type BranchReader interface {
+	BranchHead(repo, branch string) (*github.Commit, error)
+}
+
 // Lookup reports whether an AUR package exists.
 type Lookup interface {
 	Lookup(pkgbase string) (aur.Info, bool, error)
@@ -54,9 +60,11 @@ type PublishRequest struct {
 // Deps are the collaborators a run needs. All are injectable for testing.
 type Deps struct {
 	Fetch    Fetcher
+	Branches BranchReader
 	Lookup   Lookup
 	Publish  Publisher
 	Checksum repo.Checksum
+	Digest   repo.Digest
 	Log      func(format string, args ...any)
 }
 
@@ -151,64 +159,89 @@ func runTask(cfg *conf.Config, p conf.Package, opts Options, remote aur.Remote, 
 	}
 	res.Pkgbase = base
 
-	gen := repo.MustGet(p.Task)
+	gen := repo.WithOverrides(repo.MustGet(p.Task), cfg.Maintainer, p.Overrides)
 	dir := filepath.Join(opts.OutDir, base)
 	lockPath := filepath.Join(dir, "auto-aur.lock.json")
 
-	prevPkgver, err := fsx.ReadLock(lockPath)
+	prev, err := fsx.ReadLock(lockPath)
 	if err != nil {
 		res.Action, res.Err = "failed", err
 		return res
 	}
 
-	wanted := gen.Wanted()
-	rel, err := deps.Fetch.Fetch(github.Wanted{Repo: wanted.Repo, Tag: wanted.Tag, Search: wanted.Search})
+	up, err := resolveUpstream(gen.Wanted(), deps)
 	if err != nil {
 		res.Action, res.Err = "failed", err
 		return res
 	}
 
-	gen2 := repo.WithOverrides(gen, cfg.Maintainer, p.Overrides)
-	sum := deps.Checksum
-	if sum == nil {
-		sum = func(string) (string, error) { return "", fmt.Errorf("no checksum fetcher configured") }
-	}
-	up, err := gen2.Render(repo.Release{TagName: rel.TagName, Assets: toRepoAssets(rel.Assets)}, sum)
+	// Cheap skip: the version is derived from upstream metadata alone, so an
+	// unchanged package costs no asset download at all.
+	pkgver, err := gen.Pkgver(up)
 	if err != nil {
 		res.Action, res.Err = "failed", err
 		return res
 	}
-	res.Pkgver = up.Pkgver
-	res.Upstream = up
+	res.Pkgver = pkgver
 
-	if !opts.Force && prevPkgver == up.Pkgver {
-		if diffs := metadataDiff(filepath.Join(dir, "PKGBUILD"), up.Fields); len(diffs) == 0 {
+	// Decide pkgrel before rendering. A rebuilt upstream asset (same version,
+	// different bytes) must bump pkgrel or pacman would never upgrade.
+	pkgrel := 1
+	if prev.Pkgver == pkgver && prev.Fingerprint != "" && prev.Fingerprint != up.Fingerprint {
+		if prev.Pkgrel > 0 {
+			pkgrel = prev.Pkgrel + 1
+		}
+		res.Reason = "upstream content changed for the same version"
+	}
+
+	net := repo.Net{
+		Checksum: deps.Checksum,
+		Digest:   deps.Digest,
+	}
+	genned, err := gen.Render(repo.Context{Upstream: up, Pkgrel: pkgrel, Net: net})
+	if err != nil {
+		res.Action, res.Err = "failed", err
+		return res
+	}
+	if genned.Pkgver != "" {
+		res.Pkgver = genned.Pkgver
+	}
+	if genned.Pkgrel == 0 {
+		genned.Pkgrel = pkgrel
+	}
+	res.Upstream = genned
+
+	// Same version, same fingerprint: only republish when the package
+	// definition itself changed (dependency fix, description edit).
+	if !opts.Force && prev.Pkgver == pkgver && prev.Fingerprint == up.Fingerprint {
+		if diffs := metadataDiff(filepath.Join(dir, "PKGBUILD"), genned.Fields); len(diffs) == 0 {
 			res.Action = "skip"
 			return res
-		} else {
-			// The version did not move but the package definition did; republish
-			// so dependency or description fixes are not stuck locally.
-			res.Reason = strings.Join(diffs, "; ")
 		}
+		res.Reason = strings.Join(metadataDiff(filepath.Join(dir, "PKGBUILD"), genned.Fields), "; ")
 	}
 
-	srcinfo := gen2.Srcinfo(up)
+	lockRec := fsx.LockFile{
+		Pkgver:      genned.Pkgver,
+		Pkgrel:      genned.Pkgrel,
+		Fingerprint: up.Fingerprint,
+	}
 
 	if opts.DryRun {
 		res.Action = "dry-run"
-		fmt.Printf("=== %s (%s) ===\n%s\n", p.Task, up.Pkgver, up.PKGBUILD)
+		fmt.Printf("=== %s (%s-%d) ===\n%s\n%s\n", p.Task, genned.Pkgver, genned.Pkgrel, genned.PKGBUILD, genned.Srcinfo)
 		return res
 	}
 
-	if err := fsx.WriteFile(filepath.Join(dir, "PKGBUILD"), up.PKGBUILD, 0o644); err != nil {
+	if err := fsx.WriteFile(filepath.Join(dir, "PKGBUILD"), genned.PKGBUILD, 0o644); err != nil {
 		res.Action, res.Err = "failed", err
 		return res
 	}
-	if err := fsx.WriteLock(lockPath, up.Pkgver); err != nil {
+	if err := fsx.WriteLock(lockPath, lockRec); err != nil {
 		res.Action, res.Err = "failed", err
 		return res
 	}
-	if err := fsx.WriteFile(filepath.Join(dir, ".SRCINFO"), srcinfo, 0o644); err != nil {
+	if err := fsx.WriteFile(filepath.Join(dir, ".SRCINFO"), genned.Srcinfo, 0o644); err != nil {
 		res.Action, res.Err = "failed", err
 		return res
 	}
@@ -218,13 +251,18 @@ func runTask(cfg *conf.Config, p conf.Package, opts Options, remote aur.Remote, 
 		return res
 	}
 
+	lockJSON, err := fsx.MarshalLock(lockRec)
+	if err != nil {
+		res.Action, res.Err = "failed", err
+		return res
+	}
 	action, err := deps.Publish.Publish(PublishRequest{
 		Pkgbase: base,
-		Pkgver:  up.Pkgver,
+		Pkgver:  genned.Pkgver,
 		Files: aur.Files{
-			Pkgbuild: up.PKGBUILD,
-			Srcinfo:  srcinfo,
-			Lock:     fmt.Sprintf("{\"pkgver\":%q}\n", up.Pkgver),
+			Pkgbuild: genned.PKGBUILD,
+			Srcinfo:  genned.Srcinfo,
+			Lock:     lockJSON,
 		},
 	})
 	if err != nil {
@@ -234,6 +272,76 @@ func runTask(cfg *conf.Config, p conf.Package, opts Options, remote aur.Remote, 
 	res.Action = action.String()
 	res.Pushed = action != aur.ActionUnchanged
 	return res
+}
+
+// resolveUpstream turns a task's Wanted into a concrete Upstream, either a
+// release or a branch head.
+func resolveUpstream(w repo.Wanted, deps Deps) (repo.Upstream, error) {
+	if w.Branch != "" {
+		if deps.Branches == nil {
+			return repo.Upstream{}, fmt.Errorf("no branch reader configured")
+		}
+		head, err := deps.Branches.BranchHead(w.Repo, w.Branch)
+		if err != nil {
+			return repo.Upstream{}, err
+		}
+		return repo.Upstream{
+			Commit:      head.SHA,
+			Date:        utcDate(head.Info.Committer.Date),
+			Fingerprint: head.SHA,
+		}, nil
+	}
+	if deps.Fetch == nil {
+		return repo.Upstream{}, fmt.Errorf("no release fetcher configured")
+	}
+	rel, err := deps.Fetch.Fetch(github.Wanted{Repo: w.Repo, Tag: w.Tag, Search: w.Search})
+	if err != nil {
+		return repo.Upstream{}, err
+	}
+	return repo.Upstream{
+		Tag:         rel.TagName,
+		Commit:      commitFromRelease(rel),
+		Date:        utcDate(rel.PublishedAt),
+		Assets:      toRepoAssets(rel.Assets),
+		Fingerprint: releaseFingerprint(rel),
+	}, nil
+}
+
+// releaseFingerprint changes when the release is republished or any asset is
+// replaced in place, which is exactly what a rolling "canary" tag does.
+func releaseFingerprint(rel *github.Release) string {
+	parts := []string{rel.TagName, rel.PublishedAt}
+	for _, a := range rel.Assets {
+		parts = append(parts, fmt.Sprintf("%s:%d:%s", a.Name, a.Size, a.UpdatedAt))
+	}
+	return strings.Join(parts, "|")
+}
+
+// commitFromRelease extracts a commit SHA from the release body, where CI often
+// records the built revision.
+func commitFromRelease(rel *github.Release) string {
+	for _, line := range strings.Split(rel.Body, "\n") {
+		for _, field := range strings.FieldsFunc(line, func(r rune) bool {
+			return !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f'))
+		}) {
+			if len(field) == 40 {
+				return field
+			}
+		}
+	}
+	return ""
+}
+
+// utcDate formats an RFC3339 timestamp as YYYYMMDD in UTC, or "" when unset.
+func utcDate(ts string) string {
+	if ts == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return ""
+	}
+	return t.UTC().Format("20060102")
 }
 
 // metadataDiff compares the published PKGBUILD against the freshly rendered

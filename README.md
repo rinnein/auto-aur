@@ -2,7 +2,22 @@
 
 自动把 GitHub Release 发布到 AUR 的框架。用 Go 编写，由 GitHub Actions 定时驱动。
 
-仓库本身**不包含任何具体软件包**（`packages` 为空、无可注册任务），只提供引擎；要发布什么，由你在 `repo/` 里按需加任务、在 `conf.json` 里启用。
+当前内置任务（`repo/szulife/`），对应 [rinnein/your-szu-life](https://github.com/rinnein/your-szu-life)：
+
+| 任务 | 包名 | 来源 |
+| --- | --- | --- |
+| `your-szu-life-bin` | `your-szu-life-bin` | `canary` release 里的预编译 `.deb` |
+| `your-szu-life-git` | `your-szu-life-git` | `main` 分支源码构建 |
+
+两个包都 `provides=('your-szu-life')` 且互相 `conflicts`，因此：
+
+```sh
+paru -S your-szu-life     # 会列出上面两个包供选择
+paru -S your-szu-life-bin # 直接装预编译版
+paru -S your-szu-life-git # 直接装源码构建版
+```
+
+**刻意不发布真正的 `your-szu-life` 包**：一个真实包名会遮蔽 provider 列表，`paru -S your-szu-life` 就变成直接安装它，用户失去选择权。
 
 许可证仅适用于脚本本身，不适用于生成的 AUR 包。
 
@@ -10,7 +25,7 @@
 
 对 `conf.json` 里每个启用的任务：
 
-1. 从 GitHub 读取目标 release（`latest` / 按 tag / 按关键字搜索）。
+1. 从 GitHub 读取上游：release（`latest` / 按 tag / 按关键字搜索）或分支最新提交（`-git` 包）。
 2. 渲染 `PKGBUILD`，生成 `.SRCINFO`（优先用 `makepkg --printsrcinfo`，没有 makepkg 时用内置生成器）。
 3. 与已发布的 `auto-aur.lock.json` 和 `PKGBUILD` 对比；版本号和元数据都没变则跳过。
 4. 把改动推到 AUR 的对应包仓库；**如果 AUR 上还没有这个包，会自动创建**。
@@ -35,12 +50,15 @@ go build -o auto-aur .
   "maintainer": "Your Name <you@example.com>",
   "aur": { "host": "aur.archlinux.org", "user": "aur", "branch": "master" },
   "createOnMissing": true,
-  "packages": [],
+  "packages": [
+    { "task": "your-szu-life-bin" },
+    { "task": "your-szu-life-git" }
+  ],
   "disabled": []
 }
 ```
 
-- `packages` 决定要执行哪些任务，顺序即执行顺序。**初始为空**，添加形如 `{ "task": "your-task" }` 的条目后才会真正工作。
+- `packages` 决定要执行哪些任务，顺序即执行顺序。加 `{ "task": "..." }` 启用，删掉即停用。
 - 禁用任务有两种写法：条目上 `"disabled": true`，或把任务名（支持 `*` 通配，如 `app-*`）放进顶层 `"disabled"`。被禁用的任务完全不碰 AUR —— 不查询、不克隆、不渲染。
 - `overrides` 可覆盖 `pkgname` / `depends` / `conflicts` / `provides` / `pkgdesc` / `url` / `license` / `arch` / `options` / `pkgrel` / `disname` 等字段。
 - `aur` 段省略时使用上面的默认值，与 workflow 写入的 `~/.ssh/config` 一致。
@@ -154,3 +172,14 @@ go test ./...
 ```
 
 测试不依赖网络：GitHub 与 AUR RPC 用 fixture/httptest，AUR 的建包与更新流程用本地 bare 仓库模拟。
+
+## 变化检测与版本
+
+每个任务在 `auto-aur.lock.json` 里记录 `pkgver`、`pkgrel` 和 `fingerprint`：
+
+- **fingerprint** 标识上游的确切内容。release 任务用 tag + 发布时间 + 每个资产的名字/大小/更新时间；`-git` 任务用提交 SHA。
+- 版本变了 → 重发，`pkgrel` 归 1。
+- 版本没变但 fingerprint 变了（比如 `canary` 用同一个版本号重建了 deb）→ **`pkgrel` 自增**，否则 pacman 会认为已是最新而不升级。
+- 两者都没变 → 只比较 PKGBUILD 的字段，字段也没变才跳过。
+
+`-bin` 包每次运行都会下载一次 deb 来算 sha256（release 没有附带校验和文件），约 39 MB；`-git` 包不下载任何东西。

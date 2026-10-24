@@ -1,5 +1,5 @@
 // Package repo holds the task registry: every package auto-aur can publish is
-// described by one Entry and built by a shared generator.
+// described by a Generator and registered under a task name.
 package repo
 
 import (
@@ -11,28 +11,97 @@ import (
 	"github.com/rinnein/auto-aur/internal/pkgbuild"
 )
 
-// Wanted is the upstream release a task tracks.
+// Wanted describes the upstream a task tracks.
+//
+// Exactly one mode applies, in this order: Tag (a specific release), Search (the
+// newest release whose name or tag matches), Branch (the head of a git branch),
+// otherwise the repository's latest release.
 type Wanted struct {
 	Repo   string
 	Tag    string
 	Search string
+	// Branch tracks the head commit of a branch instead of a release. VCS
+	// packages (-git) use this: they package a moving branch, not a tarball.
+	Branch string
 }
 
-// Generated is what a task produces once its release is known.
+// Asset is a release artefact.
+type Asset struct {
+	Name string
+	URL  string
+	Size int64
+}
+
+// Upstream is the resolved source a task renders from.
+type Upstream struct {
+	// Tag is the release tag, empty in branch mode.
+	Tag string
+	// Commit is the commit the package resolves to, when known.
+	Commit string
+	// Date is the commit (or release) date as YYYYMMDD, in UTC. VCS packages
+	// need it to build a monotonic pkgver without cloning.
+	Date string
+	// Assets are the release artefacts, empty in branch mode.
+	Assets []Asset
+	// Fingerprint identifies this exact upstream state. It changes when the
+	// underlying content changes even though the version string may not (a
+	// republished release, a rebuilt asset).
+	Fingerprint string
+}
+
+// Generated is a rendered package definition.
 type Generated struct {
 	Pkgname string
 	Pkgver  string
-	// Pkgrel defaults to 1 and only changes when a task says so.
-	Pkgrel int
-	// PKGBUILD is the rendered file text.
+	Pkgrel  int
+	// PKGBUILD and Srcinfo are the file contents to publish.
 	PKGBUILD string
-	// Fields is the parsed view of PKGBUILD, used to compare against the
-	// previously published file.
+	Srcinfo  string
+	// Fields is the parsed view of PKGBUILD, used to detect edits that do not
+	// change the version.
 	Fields pkgbuild.Fields
-	// Source is the resolved download URL handed to PKGBUILD.
-	Source string
-	// SHA1 is the checksum sum for Source.
-	SHA1 string
+	// Fingerprint is carried into the lock file so the next run can tell
+	// "same version, different content" from "nothing changed".
+	Fingerprint string
+	// Note is an optional one-line remark for the run summary.
+	Note string
+}
+
+// Checksum fetches a small text asset, typically a .sha1/.sha256 file.
+type Checksum func(url string) (string, error)
+
+// Digest streams a (potentially large) asset and returns its hex digest.
+// algo is "sha256" or "sha1". Generators use it for binary assets that ship no
+// checksum file of their own.
+type Digest func(url, algo string) (string, error)
+
+// Net is the set of network helpers available to a generator. They are
+// injected so package definitions stay free of HTTP details.
+type Net struct {
+	Checksum Checksum
+	Digest   Digest
+}
+
+// Context is everything a generator needs for one render.
+type Context struct {
+	Upstream Upstream
+	// Pkgrel, when non-zero, overrides the generator's default. The app layer
+	// sets it when it must bump pkgrel for a same-version content change.
+	Pkgrel int
+	Net    Net
+}
+
+// Generator is implemented by each package family.
+type Generator interface {
+	// Pkgname is the default AUR package base.
+	Pkgname() string
+	// Wanted describes the upstream to resolve.
+	Wanted() Wanted
+	// Pkgver derives the version from upstream metadata alone, without
+	// downloading assets. It lets the app skip unchanged packages cheaply.
+	Pkgver(up Upstream) (string, error)
+	// Render produces the files to publish. It may download assets.
+	Render(ctx Context) (Generated, error)
 }
 
 // Overrider is implemented by generators that accept conf.json overrides.
@@ -47,43 +116,6 @@ func WithOverrides(g Generator, maintainer string, o conf.Overrides) Generator {
 		return ov.WithMaintainer(maintainer, o)
 	}
 	return g
-}
-
-// Checksum fetches the content of a small text asset (typically a .sha1 file).
-// It is injected so generators stay free of network code.
-type Checksum func(url string) (string, error)
-
-// Generator is implemented by each package family.
-type Generator interface {
-	// Pkgname is the default AUR package base.
-	Pkgname() string
-	// Wanted describes the upstream release to resolve.
-	Wanted() Wanted
-	// Render builds the PKGBUILD for a resolved release, fetching whatever
-	// small auxiliary files (checksums) the package definition needs.
-	Render(rel Release, sum Checksum) (Generated, error)
-	// Srcinfo renders .SRCINFO without makepkg.
-	Srcinfo(g Generated) string
-}
-
-// Release is the minimal view of a GitHub release a generator needs.
-type Release struct {
-	TagName string
-	Assets  []Asset
-}
-
-// Asset is a release artefact.
-type Asset struct {
-	Name string
-	URL  string
-}
-
-// Entry pairs a generator with the metadata the app layer needs.
-type Entry struct {
-	Name string
-	Gen  Generator
-	// Overrides from conf.json, applied on top of generator defaults.
-	Overrides conf.Overrides
 }
 
 var (
