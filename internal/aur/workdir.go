@@ -90,6 +90,11 @@ const gitignoreBody = "*\n"
 //   - the package was deleted but its repository still clones: push --force so
 //     the leftover content is replaced instead of merged.
 func (w *Workdir) Push(files Files) (Action, error) {
+	// Normalise once so every git invocation and file write agrees on the
+	// location, regardless of whether OutDir was relative.
+	if dir, err := filepath.Abs(w.Dir); err == nil {
+		w.Dir = dir
+	}
 	if err := w.write(files); err != nil {
 		return ActionUnchanged, err
 	}
@@ -172,13 +177,6 @@ func (w *Workdir) write(files Files) error {
 	if err := fsx.WriteFile(filepath.Join(w.Dir, "auto-aur.lock.json"), files.Lock, 0o644); err != nil {
 		return err
 	}
-	gi := filepath.Join(w.Dir, ".gitignore")
-	// Only seed .gitignore when absent so a hand-edited one survives.
-	if !fsx.Exists(gi) {
-		if err := fsx.WriteFile(gi, gitignoreBody, 0o644); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -186,6 +184,12 @@ func (w *Workdir) write(files Files) error {
 // for one whose clone failed.
 func (w *Workdir) initRepo() error {
 	if _, err := w.Git.RunIn(w.Dir, "init", "-q"); err != nil {
+		return err
+	}
+	// Seed .gitignore only for repositories this tool creates. An existing AUR
+	// repository is left untouched: it may be maintained by hand, and adding
+	// files unasked would show up as an unexpected commit.
+	if err := fsx.WriteFile(filepath.Join(w.Dir, ".gitignore"), gitignoreBody, 0o644); err != nil {
 		return err
 	}
 	// The AUR only accepts pushes to master. gitx pins init.defaultbranch, and
@@ -204,19 +208,28 @@ func (w *Workdir) initRepo() error {
 // Clone prepares Dir for pkgbase. It reports whether the remote repository was
 // empty (a brand new package) so the caller can log accordingly.
 func (w *Workdir) Clone() (empty bool, err error) {
-	if fsx.IsDir(filepath.Join(w.Dir, ".git")) {
+	// git resolves a relative clone target against the working directory, so a
+	// relative OutDir would be applied twice. Work with absolute paths only.
+	dir, err := filepath.Abs(w.Dir)
+	if err != nil {
+		return false, fmt.Errorf("aur: resolve %s: %w", w.Dir, err)
+	}
+	w.Dir = dir
+	parent := filepath.Dir(dir)
+
+	if fsx.IsDir(filepath.Join(dir, ".git")) {
 		return false, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(w.Dir), 0o755); err != nil {
-		return false, fmt.Errorf("aur: create %s: %w", filepath.Dir(w.Dir), err)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return false, fmt.Errorf("aur: create %s: %w", parent, err)
 	}
 	// A stale directory without .git would make clone fail; clear it first.
-	if fsx.IsDir(w.Dir) {
-		if err := os.RemoveAll(w.Dir); err != nil {
-			return false, fmt.Errorf("aur: clear %s: %w", w.Dir, err)
+	if fsx.IsDir(dir) {
+		if err := os.RemoveAll(dir); err != nil {
+			return false, fmt.Errorf("aur: clear %s: %w", dir, err)
 		}
 	}
-	_, err = w.Git.RunIn(filepath.Dir(w.Dir), "clone", "-q", w.Remote.URL(w.Pkgbase), w.Dir)
+	_, err = w.Git.RunIn(parent, "clone", "-q", w.Remote.URL(w.Pkgbase), dir)
 	if err == nil {
 		// Cloning an empty repository succeeds and prints only a warning, so
 		// emptiness has to be detected from the checkout, not from exit codes.

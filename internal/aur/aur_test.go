@@ -194,6 +194,28 @@ func TestUpdateExistingPackage(t *testing.T) {
 	}
 }
 
+// TestExistingRepoIsNotPolluted verifies that updating someone else's AUR
+// repository does not inject files (e.g. .gitignore) they never committed.
+func TestExistingRepoIsNotPolluted(t *testing.T) {
+	f := newFakeAUR(t, "demo-keep", true)
+	wd := workdirFor(t, f, "demo-keep")
+	if _, err := wd.Clone(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wd.Push(files("2.0.0")); err != nil {
+		t.Fatal(err)
+	}
+	tree := git(t, f.host, "--git-dir", f.host, "ls-tree", "--name-only", "master")
+	if strings.Contains(tree, ".gitignore") {
+		t.Fatalf("update must not add .gitignore to an existing repo:\n%s", tree)
+	}
+	for _, want := range []string{"PKGBUILD", ".SRCINFO", "auto-aur.lock.json"} {
+		if !strings.Contains(tree, want) {
+			t.Errorf("missing %s:\n%s", want, tree)
+		}
+	}
+}
+
 func TestPushIsIdempotent(t *testing.T) {
 	f := newFakeAUR(t, "demo-bin", false)
 	wd := workdirFor(t, f, "demo-bin")
@@ -209,6 +231,44 @@ func TestPushIsIdempotent(t *testing.T) {
 	}
 	if action != ActionUnchanged {
 		t.Fatalf("action=%v want unchanged (no diff to commit)", action)
+	}
+}
+
+// TestCloneWithRelativeOutDir guards a real bug: git resolves a relative clone
+// target against its own working directory, so a relative out dir was applied
+// twice and cloning failed with "target path already exists".
+func TestCloneWithRelativeOutDir(t *testing.T) {
+	f := newFakeAUR(t, "demo-rel", false)
+
+	// Run from a temp cwd so the relative path is unambiguous.
+	prev, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	if err := os.Chdir(work); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(prev) }()
+
+	wd := &Workdir{
+		Dir:     filepath.Join("out", "demo-rel"),
+		Pkgbase: "demo-rel",
+		Remote:  Remote{Host: "localhost", User: "aur", Branch: "master", BaseURL: f.root},
+		Git:     &gitx.Runner{Dir: ".", Name: "t", Email: "t@example.invalid"},
+	}
+	empty, err := wd.Clone()
+	if err != nil {
+		t.Fatalf("clone with relative out dir: %v", err)
+	}
+	if !empty {
+		t.Fatal("expected an empty clone")
+	}
+	if _, err := wd.Push(files("1.0.0")); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if !hasRefs(t, f.host) {
+		t.Fatal("relative-path push did not reach the remote")
 	}
 }
 
