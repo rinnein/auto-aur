@@ -45,8 +45,11 @@ type Lookup interface {
 	Lookup(pkgbase string) (aur.Info, bool, error)
 }
 
-// Publisher publishes one package repository.
+// Publisher prepares and publishes one package repository.
 type Publisher interface {
+	// Prepare makes the package checkout available so the previous lock file
+	// and PKGBUILD can be inspected before rendering.
+	Prepare(pkgbase string) error
 	Publish(req PublishRequest) (aur.Action, error)
 }
 
@@ -162,6 +165,15 @@ func runTask(cfg *conf.Config, p conf.Package, opts Options, remote aur.Remote, 
 	gen := repo.WithOverrides(repo.MustGet(p.Task), cfg.Maintainer, p.Overrides)
 	dir := filepath.Join(opts.OutDir, base)
 	lockPath := filepath.Join(dir, "auto-aur.lock.json")
+
+	// Check out the published repository first: skip detection and pkgrel
+	// bumping both depend on the lock file that lives in it.
+	if !opts.DryRun && deps.Publish != nil {
+		if err := deps.Publish.Prepare(base); err != nil {
+			res.Action, res.Err = "failed", err
+			return res
+		}
+	}
 
 	prev, err := fsx.ReadLock(lockPath)
 	if err != nil {

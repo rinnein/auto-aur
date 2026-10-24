@@ -90,7 +90,19 @@ type published struct {
 	files   aur.Files
 }
 
-type fakePublisher struct{ got []published }
+type fakePublisher struct {
+	got      []published
+	prepared []string
+	prepErr  error
+}
+
+func (p *fakePublisher) Prepare(pkgbase string) error {
+	if p.prepErr != nil {
+		return p.prepErr
+	}
+	p.prepared = append(p.prepared, pkgbase)
+	return nil
+}
 
 func (p *fakePublisher) Publish(req PublishRequest) (aur.Action, error) {
 	p.got = append(p.got, published{req.Pkgbase, req.Files})
@@ -584,3 +596,65 @@ func TestRebuiltAssetBumpsPkgrel(t *testing.T) {
 
 // fsxReadLock keeps the lock assertions readable.
 func fsxReadLock(path string) (fsx.LockFile, error) { return fsx.ReadLock(path) }
+
+// recordingPublisher mimics the real publisher: Prepare materialises a checkout
+// containing a previously published lock file, which is what makes skip
+// detection and pkgrel bumping possible on a fresh CI run.
+type recordingPublisher struct {
+	outDir  string
+	task    string
+	pkgbase string
+	lock    string // lock content written by Prepare
+	done    []string
+}
+
+func (p *recordingPublisher) Prepare(pkgbase string) error {
+	dir := filepath.Join(p.outDir, pkgbase)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if p.lock != "" {
+		return os.WriteFile(filepath.Join(dir, "auto-aur.lock.json"), []byte(p.lock), 0o644)
+	}
+	return nil
+}
+
+func (p *recordingPublisher) Publish(req PublishRequest) (aur.Action, error) {
+	p.done = append(p.done, req.Pkgver)
+	return aur.ActionUnchanged, nil
+}
+
+// TestLockIsReadFromPreparedCheckout guards the bug CI exposed: the lock was
+// read before the AUR checkout existed, so pkgver/pkgrel from a previous run
+// were invisible and a rebuilt asset could never bump pkgrel.
+func TestLockIsReadFromPreparedCheckout(t *testing.T) {
+	const task, pkgbase = "prep-demo", "prep-demo-pkg"
+	repo.Register(task, &fakeGen{pkgname: pkgbase})
+
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "conf.json")
+	cfg := `{"maintainer":"T <t@e.i>","packages":[{"task":"` + task + `"}]}`
+	if err := os.WriteFile(confPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "out")
+
+	pub := &recordingPublisher{outDir: outDir, pkgbase: pkgbase}
+	// Pretend a previous run published v1.0.0 with the same fingerprint.
+	pub.lock = `{"pkgver":"v1.0.0","pkgrel":1,"fingerprint":"v1.0.0|same"}`
+	deps := Deps{
+		Fetch:   &fakeFetcher{rel: github.Release{TagName: "v1.0.0", PublishedAt: "same"}},
+		Publish: pub,
+	}
+
+	results, err := Run(Options{ConfPath: confPath, OutDir: outDir}, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Action != "skip" {
+		t.Fatalf("action=%q want skip; the lock from the checkout was not consulted", results[0].Action)
+	}
+	if len(pub.done) != 0 {
+		t.Fatalf("skip must not publish, got %v", pub.done)
+	}
+}

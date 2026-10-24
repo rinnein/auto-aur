@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/rinnein/auto-aur/internal/aur"
+	"github.com/rinnein/auto-aur/internal/fsx"
 	"github.com/rinnein/auto-aur/internal/gitx"
 	"github.com/rinnein/auto-aur/repo"
 )
@@ -41,12 +42,47 @@ func (p *AURPublisher) rpcClient() *aur.Client {
 	return aur.NewClient(p.Remote.Host)
 }
 
-// Publish implements Publisher.
+// Prepare checks out the package repository so the caller can read the
+// previously published files (notably auto-aur.lock.json) before deciding what
+// to render. Without this the lock would be unavailable on a fresh CI run and
+// pkgrel could never be bumped for a rebuilt asset.
+func (p *AURPublisher) Prepare(pkgbase string) error {
+	logf := p.Log
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	dir := filepath.Join(p.OutDir, pkgbase)
+	if fsx.IsDir(filepath.Join(dir, ".git")) {
+		return nil
+	}
+
+	runner := &gitx.Runner{Dir: dir, Name: p.Name, Email: p.Email}
+	wd := &aur.Workdir{Dir: dir, Pkgbase: pkgbase, Remote: p.Remote, Git: runner}
+
+	_, exists, err := p.rpcClient().Lookup(pkgbase)
+	if err != nil {
+		return err
+	}
+	if exists {
+		logf("aur: %s exists", pkgbase)
+	} else {
+		logf("aur: %s does not exist yet; it will be created", pkgbase)
+	}
+
+	empty, err := wd.Clone()
+	if err != nil {
+		return err
+	}
+	if empty {
+		logf("aur: %s has no published content yet", pkgbase)
+	}
+	return nil
+}
+
+// Publish writes the files into the prepared checkout and pushes them.
 //
 // The AUR treats a push to a pkgbase that does not exist yet as package
-// creation, provided the SSH key is known to the account. The flow therefore
-// is: query the RPC for existence (for a precise log line and to honour
-// create-on-missing), clone or initialise the repository, then push.
+// creation, provided the SSH key is known to the account.
 func (p *AURPublisher) Publish(req PublishRequest) (aur.Action, error) {
 	logf := p.Log
 	if logf == nil {
@@ -56,24 +92,6 @@ func (p *AURPublisher) Publish(req PublishRequest) (aur.Action, error) {
 
 	runner := &gitx.Runner{Dir: dir, Name: p.Name, Email: p.Email}
 	wd := &aur.Workdir{Dir: dir, Pkgbase: req.Pkgbase, Remote: p.Remote, Git: runner}
-
-	info, exists, err := p.rpcClient().Lookup(req.Pkgbase)
-	if err != nil {
-		return aur.ActionUnchanged, err
-	}
-	if exists {
-		logf("aur: %s exists (version %s)", req.Pkgbase, info.Version)
-	} else {
-		logf("aur: %s does not exist yet; it will be created", req.Pkgbase)
-	}
-
-	empty, err := wd.Clone()
-	if err != nil {
-		return aur.ActionUnchanged, err
-	}
-	if empty && !exists {
-		logf("aur: creating repository for %s", req.Pkgbase)
-	}
 
 	action, err := wd.Push(aur.Files{
 		Pkgbuild: req.Files.Pkgbuild,
