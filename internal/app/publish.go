@@ -1,0 +1,139 @@
+package app
+
+import (
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/rinnein/auto-aur/internal/aur"
+	"github.com/rinnein/auto-aur/internal/gitx"
+	"github.com/rinnein/auto-aur/repo"
+)
+
+// AURPublisher publishes package repositories via git.
+type AURPublisher struct {
+	OutDir string
+	Remote aur.Remote
+	Name   string
+	Email  string
+	Log    func(format string, args ...any)
+	// RPCBaseURL overrides the RPC endpoint; empty derives it from Remote.Host.
+	// Used by tests that point the remote at a local directory.
+	RPCBaseURL string
+}
+
+// rpcClient builds the RPC client for this publisher.
+func (p *AURPublisher) rpcClient() *aur.Client {
+	if p.RPCBaseURL != "" {
+		c := aur.NewClient(p.Remote.Host)
+		c.BaseURL = p.RPCBaseURL
+		return c
+	}
+	return aur.NewClient(p.Remote.Host)
+}
+
+// Publish implements Publisher.
+//
+// The AUR treats a push to a pkgbase that does not exist yet as package
+// creation, provided the SSH key is known to the account. The flow therefore
+// is: query the RPC for existence (for a precise log line and to honour
+// create-on-missing), clone or initialise the repository, then push.
+func (p *AURPublisher) Publish(req PublishRequest) (aur.Action, error) {
+	logf := p.Log
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	dir := filepath.Join(p.OutDir, req.Pkgbase)
+
+	runner := &gitx.Runner{Dir: dir, Name: p.Name, Email: p.Email}
+	wd := &aur.Workdir{Dir: dir, Pkgbase: req.Pkgbase, Remote: p.Remote, Git: runner}
+
+	info, exists, err := p.rpcClient().Lookup(req.Pkgbase)
+	if err != nil {
+		return aur.ActionUnchanged, err
+	}
+	if exists {
+		logf("aur: %s exists (version %s)", req.Pkgbase, info.Version)
+	} else {
+		logf("aur: %s does not exist yet; it will be created", req.Pkgbase)
+	}
+
+	empty, err := wd.Clone()
+	if err != nil {
+		return aur.ActionUnchanged, err
+	}
+	if empty && !exists {
+		logf("aur: creating repository for %s", req.Pkgbase)
+	}
+
+	action, err := wd.Push(aur.Files{
+		Pkgbuild: req.Files.Pkgbuild,
+		Srcinfo:  req.Files.Srcinfo,
+		Lock:     req.Files.Lock,
+	})
+	if err != nil {
+		return action, err
+	}
+	if action == aur.ActionCreated || action == aur.ActionRecreated {
+		// Confirm the repository is now visible; a lagging index is not an
+		// error, but an absent package after a successful push is worth saying.
+		if _, ok, lerr := p.rpcClient().Lookup(req.Pkgbase); lerr == nil && !ok {
+			logf("aur: %s pushed but not yet listed by the RPC (index lag)", req.Pkgbase)
+		}
+	}
+	return action, nil
+}
+
+// MakepkgSrcinfo regenerates .SRCINFO with makepkg when that tool is present,
+// which keeps the file byte-identical to what a packager would produce locally.
+func MakepkgSrcinfo(dir string) (string, bool) {
+	if _, err := exec.LookPath("makepkg"); err != nil {
+		return "", false
+	}
+	cmd := exec.Command("makepkg", "--printsrcinfo")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PKGDEST=/dev/null")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	s := string(out)
+	return s, strings.TrimSpace(s) != ""
+}
+
+// HTTPChecksum downloads a checksum file from a release asset URL.
+//
+// Release assets redirect to storage hosts, which must not receive the API
+// token, so the Authorization header is only attached for the API host itself.
+func HTTPChecksum(token string) repo.Checksum {
+	client := &http.Client{Timeout: 30 * time.Second}
+	return func(url string) (string, error) {
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			return "", err
+		}
+		if token != "" && strings.HasPrefix(url, "https://api.github.com/") {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("GET %s: %s", url, resp.Status)
+		}
+		// A checksum file is tiny; cap the read so a wrong URL cannot stream a
+		// whole AppImage into memory.
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if err != nil {
+			return "", err
+		}
+		return string(body), nil
+	}
+}

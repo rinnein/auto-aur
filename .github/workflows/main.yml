@@ -1,0 +1,116 @@
+name: Auto AUR
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 0 * * *" # 每天0点执行
+  workflow_dispatch:
+    inputs:
+      force_update:
+        type: boolean
+        description: "Disable skip feature(If no real updates, nothing will be pushed to AUR)"
+        required: false
+        default: false
+      debug_enabled:
+        type: boolean
+        description: "Run the build with tmate debugging enabled (https://github.com/marketplace/actions/debugging-with-tmate)"
+        required: false
+        default: false
+
+jobs:
+  build:
+    name: Auto AUR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Configure Git User
+        run: |
+          git config --global user.name "rinne"
+          git config --global user.email "Rinne@users.noreply.github.com"
+
+      - name: Setup SSH Key for AUR
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_KEY }} # 用于AUR认证的SSH私钥
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/aur_key
+          chmod 600 ~/.ssh/aur_key
+
+          # 配置SSH连接到AUR
+          cat >> ~/.ssh/config <<EOF
+          Host aur.archlinux.org
+            IdentityFile ~/.ssh/aur_key
+            User aur
+          EOF
+
+          # 测试SSH连接（可选）
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+          # ssh -T aur.archlinux.org
+
+      - name: Setup tmate session
+        uses: mxschmitt/action-tmate@v3
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.debug_enabled }}
+        with:
+          limit-access-to-actor: true
+
+      - name: Remove auto-aur.lock.json (force update)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.force_update }}
+        run: |
+          rm -rf ./out/*/auto-aur.lock.json
+
+      - name: Update PKGBUILD
+        env:
+          # Optional: raises the GitHub API rate limit. The workflow succeeds
+          # without it, but unauthenticated quota is exhausted quickly.
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          go build -trimpath -o "$RUNNER_TEMP/auto-aur" .
+          "$RUNNER_TEMP/auto-aur" run -v
+
+      - uses: addnab/docker-run-action@v3
+        with:
+          registry: registry.docker.io
+          image: archlinux:base-devel
+          options: -v ${{ github.workspace }}/out:/workspace
+          run: |
+            useradd -m -G wheel -s /bin/bash runner
+            cat > /workspace/build.sh <<'EOF'
+            #!/bin/bash
+            set -e
+            cd /workspace
+            for d in */; do
+              d=${d%/}
+              [ -f "$d/PKGBUILD" ] || continue
+              ( cd "$d" && makepkg --printsrcinfo > .SRCINFO )
+            done
+            EOF
+            chown -R runner:runner /workspace
+            chmod +x /workspace/build.sh
+            sudo -u runner /workspace/build.sh
+
+      - name: Commit and push changes
+        run: |
+          sudo chown -R runner:runner ./out
+          if [ -f ./out/update.sh ]; then
+            cd ./out
+            chmod +x ./update.sh
+            bash ./update.sh
+          else
+            echo "auto-aur: no update.sh generated, nothing to publish"
+          fi
+
+      - name: Setup tmate session
+        if: ${{ failure() || (github.event_name == 'workflow_dispatch' && inputs.debug_enabled) }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true

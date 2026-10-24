@@ -1,0 +1,11 @@
+{
+  "maintainer": "Rinne <aur@rinne.in>",
+  "aur": {
+    "host": "aur.archlinux.org",
+    "user": "aur",
+    "branch": "master"
+  },
+  "createOnMissing": true,
+  "packages": [],
+  "disabled": []
+}
