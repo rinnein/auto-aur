@@ -26,6 +26,39 @@ on:
         default: false
 
 jobs:
+  # auto-aur writes .SRCINFO itself instead of having CI call makepkg. That is
+  # only safe while its output matches what makepkg produces, and makepkg exists
+  # on Arch alone, so the check needs an Arch container. It runs as a separate
+  # job: publishing must not wait for it, and its failure must not leave a
+  # half-updated AUR behind.
+  srcinfo:
+    name: .SRCINFO matches makepkg
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install Go
+        run: |
+          pacman -Sy --noconfirm --needed go
+          go version
+      - uses: actions/checkout@v4
+
+      # makepkg refuses to run as root, so the test runs as an unprivileged user.
+      # AUTO_AUR_REQUIRE_MAKEPKG makes a missing tool a failure rather than a
+      # skip, so this job cannot pass without actually comparing the two. It and
+      # the Go binary path are set explicitly inside the su invocation, because su
+      # resets the environment: inheriting them would silently revert the check
+      # to a skip, and go lives outside the default PATH on Arch.
+      - name: Verify .SRCINFO against makepkg
+        run: |
+          useradd -m runner
+          chown -R runner:runner .
+          gobin=$(command -v go)
+          # HOME and GOCACHE are set explicitly: su keeps root's HOME, and Go
+          # refuses to use a build cache it cannot own.
+          su runner -c "cd '$GITHUB_WORKSPACE' && \
+            HOME=/home/runner GOCACHE=/home/runner/.cache/go-build \
+            AUTO_AUR_REQUIRE_MAKEPKG=1 '$gobin' test ./repo/your-szu-life/ -run TestSrcinfoMatchesMakepkg -v"
+
   build:
     name: Auto AUR
     runs-on: ubuntu-latest
@@ -121,35 +154,3 @@ jobs:
           # this workflow chose, never payload text. Word splitting is intended.
           # shellcheck disable=SC2086
           "$RUNNER_TEMP/auto-aur" run -v $TRIGGER_FLAGS
-
-      - uses: addnab/docker-run-action@v3
-        with:
-          registry: registry.docker.io
-          image: archlinux:base-devel
-          options: -v ${{ github.workspace }}/out:/workspace
-          run: |
-            useradd -m -G wheel -s /bin/bash runner
-            cat > /workspace/build.sh <<'EOF'
-            #!/bin/bash
-            set -e
-            cd /workspace
-            for d in */; do
-              d=${d%/}
-              [ -f "$d/PKGBUILD" ] || continue
-              ( cd "$d" && makepkg --printsrcinfo > .SRCINFO )
-            done
-            EOF
-            chown -R runner:runner /workspace
-            chmod +x /workspace/build.sh
-            sudo -u runner /workspace/build.sh
-
-      - name: Commit and push changes
-        run: |
-          sudo chown -R runner:runner ./out
-          if [ -f ./out/update.sh ]; then
-            cd ./out
-            chmod +x ./update.sh
-            bash ./update.sh
-          else
-            echo "auto-aur: no update.sh generated, nothing to publish"
-          fi

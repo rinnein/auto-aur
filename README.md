@@ -35,10 +35,12 @@ paru -S your-szu-life-git # 直接装源码构建版
 对 `conf.json` 里每个启用的任务：
 
 1. 从 GitHub 读取上游：release（`latest` / 按 tag / 按关键字搜索）或分支最新提交（`-git` 包）。
-2. 渲染 `PKGBUILD`，生成 `.SRCINFO`（优先用 `makepkg --printsrcinfo`，没有 makepkg 时用内置生成器）。
+2. 渲染 `PKGBUILD` 并生成 `.SRCINFO`。生成器不依赖 makepkg；`TestSrcinfoMatchesMakepkg`
+   会用系统上的 makepkg 校验两者逐字节一致。
 3. 与已发布的 `auto-aur.lock.json` 和 `PKGBUILD` 对比；版本号和元数据都没变则跳过。
 4. 把改动推到 AUR 的对应包仓库；**如果 AUR 上还没有这个包，会自动创建**。
-5. 写出 `out/update.sh`，由 workflow 最后一步统一执行。
+
+推送由 Go 程序在本步骤内直接完成，workflow 里不再有第二个执行 shell 的步骤。
 
 ## 由上游的发布流程自动触发
 
@@ -234,7 +236,7 @@ internal/pkgbuild/  PKGBUILD 渲染与字段解析
 internal/aur/       RPC 查询 + 包仓库克隆/创建/推送
 internal/gitx/      git 调用封装
 internal/fsx/       文件与 lock 读写
-internal/app/       编排、发布、update.sh 生成
+internal/app/       编排与发布
 ```
 
 ## 开发

@@ -113,11 +113,4 @@ func TestE2ECreateThenUpdate(t *testing.T) {
 	if !strings.Contains(remotePkgbuild, "# Maintainer: Alice <alice@example.invalid>") {
 		t.Fatalf("maintainer missing on remote:\n%s", remotePkgbuild)
 	}
-	script, err := os.ReadFile(filepath.Join(outDir, "update.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(script), "git push origin master") {
-		t.Fatalf("update.sh missing push:\n%s", script)
-	}
 }

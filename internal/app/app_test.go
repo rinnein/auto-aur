@@ -154,13 +154,6 @@ func TestNothingToDoWithEmptyPackages(t *testing.T) {
 	if len(results) != 0 {
 		t.Fatalf("expected no results, got %d", len(results))
 	}
-	script, err := os.ReadFile(filepath.Join(dir, "out", "update.sh"))
-	if err != nil {
-		t.Fatalf("update.sh must exist even when nothing ran: %v", err)
-	}
-	if !strings.Contains(string(script), "exit 0") {
-		t.Fatalf("update.sh must exit 0 when idle:\n%s", script)
-	}
 }
 
 func TestFirstRunPublishes(t *testing.T) {
@@ -183,13 +176,6 @@ func TestFirstRunPublishes(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(opts.OutDir, g.pkgname, name)); err != nil {
 			t.Errorf("missing %s: %v", name, err)
 		}
-	}
-	script, err := os.ReadFile(filepath.Join(opts.OutDir, "update.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(script), "git push origin master") {
-		t.Fatalf("update.sh should push:\n%s", script)
 	}
 }
 

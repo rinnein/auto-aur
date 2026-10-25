@@ -8,8 +8,6 @@ import (
 	"hash"
 	"io"
 	"net/http"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -109,23 +107,6 @@ func (p *AURPublisher) Publish(req PublishRequest) (aur.Action, error) {
 		}
 	}
 	return action, nil
-}
-
-// MakepkgSrcinfo regenerates .SRCINFO with makepkg when that tool is present,
-// which keeps the file byte-identical to what a packager would produce locally.
-func MakepkgSrcinfo(dir string) (string, bool) {
-	if _, err := exec.LookPath("makepkg"); err != nil {
-		return "", false
-	}
-	cmd := exec.Command("makepkg", "--printsrcinfo")
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "PKGDEST=/dev/null")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", false
-	}
-	s := string(out)
-	return s, strings.TrimSpace(s) != ""
 }
 
 // HTTPChecksum downloads a checksum file from a release asset URL.

@@ -146,14 +146,6 @@ func TestTriggerWithNoMatchPublishesNothing(t *testing.T) {
 	if len(pub.got) != 0 {
 		t.Fatalf("nothing may be published, got %+v", pub.got)
 	}
-	// The workflow runs update.sh unconditionally, so it must exist and be idle.
-	script, err := os.ReadFile(filepath.Join(opts.OutDir, "update.sh"))
-	if err != nil {
-		t.Fatalf("update.sh must still be written: %v", err)
-	}
-	if !strings.Contains(string(script), "nothing to publish") {
-		t.Fatalf("idle update.sh expected:\n%s", script)
-	}
 }
 
 func TestTriggerRespectsDisabledTasks(t *testing.T) {
