@@ -1,6 +1,7 @@
 package github
 
 import (
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -101,5 +102,89 @@ func TestNoMatchIsAnError(t *testing.T) {
 	c := server(t, releaseList, 200, nil)
 	if _, err := c.Fetch(Wanted{Repo: "o/r", Search: "gamma"}); err == nil {
 		t.Fatal("expected an error when nothing matches")
+	}
+}
+
+func TestReleaseVersion(t *testing.T) {
+	cases := []struct {
+		name    string
+		rel     Release
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "rolling tag with version in name",
+			rel:  Release{TagName: "canary", Name: "canary v0.10.0"},
+			want: "0.10.0",
+		},
+		{
+			name: "version only in body",
+			rel:  Release{TagName: "canary", Body: "自动构建预发布。\n\n版本：0.10.0\n提交：abc"},
+			want: "0.10.0",
+		},
+		{
+			name: "versioned tag",
+			rel:  Release{TagName: "v1.2.3"},
+			want: "1.2.3",
+		},
+		{
+			name: "name wins over body",
+			rel:  Release{TagName: "canary", Name: "canary v0.10.0", Body: "版本：0.9.9"},
+			want: "0.10.0",
+		},
+		{
+			name:    "rolling tag with no version anywhere",
+			rel:     Release{TagName: "canary", Name: "canary"},
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.rel.Version()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("Version()=%q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAssetSHA256(t *testing.T) {
+	withDigest := Asset{Digest: "sha256:20fe986930b25fa290fa2e59cec678be170d1eb0a4829567967648fea884d1d1"}
+	if got := withDigest.SHA256(); got != "20fe986930b25fa290fa2e59cec678be170d1eb0a4829567967648fea884d1d1" {
+		t.Fatalf("SHA256()=%q", got)
+	}
+	for _, d := range []string{"", "sha256:tooshort", "md5:abcd", "sha512:" + strings.Repeat("a", 128)} {
+		if got := (Asset{Digest: d}).SHA256(); got != "" {
+			t.Errorf("digest %q should not yield sha256 %q", d, got)
+		}
+	}
+}
+
+func TestFileVersion(t *testing.T) {
+	payload := base64.StdEncoding.EncodeToString([]byte(`{"name":"x","version":"0.10.0"}`))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/contents/package.json") {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"content":"` + payload + `","encoding":"base64"}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	got, err := c.FileVersion("o/r", "main", "package.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "0.10.0" {
+		t.Fatalf("version=%q", got)
 	}
 }

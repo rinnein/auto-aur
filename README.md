@@ -9,6 +9,11 @@
 | `your-szu-life-bin` | `your-szu-life-bin` | `canary` release 里的预编译 `.deb` |
 | `your-szu-life-git` | `your-szu-life-git` | `main` 分支源码构建 |
 
+**版本与校验和都在 CI 运行时从 release 实时确定**，代码里没有任何写死的版本或 hash：
+
+- `-bin` 的 `pkgver` 取自 release 声明的版本（release 名称 / body，回退到资产文件名）；`sha256sums` 直接读 release 资产的 `digest` 字段（GitHub 上传时记录），只有该字段缺失时才下载文件现算 —— 因此正常情况下不再下载 39 MB。
+- `-git` 完全由指定的 **`main` 分支**驱动：源码是 `git+…/your-szu-life.git#branch=main`，版本读自该分支的 `package.json`，再附上分支 HEAD 的短 sha。PKGBUILD 里的 `pkgver()` 会在构建时从同一份 `package.json` 复现，保证 makepkg 算出的版本与发布值一致。
+
 两个包的 `pkgdesc` 都取自上游仓库的 **About description**（GitHub 上的仓库简介），每次运行动态获取：改一次 GitHub 上的简介，AUR 上的描述就会跟着更新（并自动 `pkgrel+1` 让已安装用户收到）。仓库没填简介时退回内置默认值，并在运行摘要里说明。
 
 另外：deb 里自带了一个 Debian 版的 `aria2c`，它依赖的 `libaria2.so.0` 并不在 deb 内，装到 `/usr/bin/aria2c` 会与 `aria2` 包冲突（`filesystem conflict on /usr/bin/aria2c`）。打包时该文件会被删除，改由 `depends=('aria2')` 提供真正的 `aria2c`。

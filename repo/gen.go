@@ -27,6 +27,10 @@ type Wanted struct {
 	// description into Upstream.Description, for packages that use it as
 	// pkgdesc.
 	RepoDescription bool
+	// VersionFile names a JSON file (e.g. "package.json") whose "version" field
+	// is the version of a branch-tracked package. Empty means the version comes
+	// from the release as usual.
+	VersionFile string
 }
 
 // Asset is a release artefact.
@@ -34,6 +38,9 @@ type Asset struct {
 	Name string
 	URL  string
 	Size int64
+	// SHA256 is the checksum GitHub recorded for the asset at upload time.
+	// Empty when the API did not expose one.
+	SHA256 string
 }
 
 // Upstream is the resolved source a task renders from.
@@ -47,6 +54,9 @@ type Upstream struct {
 	Date string
 	// Assets are the release artefacts, empty in branch mode.
 	Assets []Asset
+	// Version is the upstream version the release declares (its name/body, or
+	// the tag when tags are per-version). Empty in branch mode.
+	Version string
 	// Description is the repository's About text, when requested via
 	// Wanted.RepoDescription.
 	Description string

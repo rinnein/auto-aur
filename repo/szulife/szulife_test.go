@@ -50,7 +50,7 @@ func TestVersionFromAsset(t *testing.T) {
 
 func TestBinPicksDebAndVersion(t *testing.T) {
 	g := &binGen{}
-	up := repo.Upstream{Tag: "canary", Assets: canaryAssets()}
+	up := repo.Upstream{Tag: "canary", Version: "0.10.0", Assets: canaryAssets()}
 
 	ver, err := g.Pkgver(up)
 	if err != nil {
@@ -83,15 +83,69 @@ func TestBinPicksDebAndVersion(t *testing.T) {
 
 func TestBinRejectsMissingDeb(t *testing.T) {
 	g := &binGen{}
-	up := repo.Upstream{Tag: "canary", Assets: []repo.Asset{{Name: "x.apk", URL: "u"}}}
-	if _, err := g.Pkgver(up); err == nil {
+	// The version comes from the release, so Pkgver succeeds; Render is what
+	// must fail when the release carries no .deb.
+	up := repo.Upstream{Tag: "canary", Version: "0.10.0", Assets: []repo.Asset{{Name: "x.apk", URL: "u"}}}
+	if _, err := g.Pkgver(up); err != nil {
+		t.Fatalf("version should come from the release, got %v", err)
+	}
+	if _, err := g.Render(repo.Context{Upstream: up, Net: testIO()}); err == nil {
 		t.Fatal("expected an error when the release has no .deb")
+	}
+}
+
+// TestBinVersionFallsBackToAssetName: the version must still come from the
+// release when its name/body do not carry one, because the asset filename is
+// generated from the same package.json.
+func TestBinVersionFallsBackToAssetName(t *testing.T) {
+	g := &binGen{}
+	ver, err := g.Pkgver(repo.Upstream{Tag: "canary", Assets: canaryAssets()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ver != "0.10.0" {
+		t.Fatalf("pkgver=%q want 0.10.0 from the asset name", ver)
+	}
+}
+
+// TestBinVersionPrefersReleaseOverAssetName: the release metadata wins, so a
+// stale filename cannot freeze the package.
+func TestBinVersionPrefersReleaseOverAssetName(t *testing.T) {
+	g := &binGen{}
+	assets := []repo.Asset{{Name: "your-szu-life_linux_x64_0.9.9-release.deb", URL: "u", SHA256: testSum}}
+	ver, err := g.Pkgver(repo.Upstream{Tag: "canary", Version: "0.10.0", Assets: assets})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ver != "0.10.0" {
+		t.Fatalf("pkgver=%q want the release version 0.10.0", ver)
+	}
+}
+
+// TestGitDoesNotDependOnRelease: a VCS package follows its branch head, so it
+// must render correctly with no release information at all.
+func TestGitDoesNotDependOnRelease(t *testing.T) {
+	g := &gitGen{}
+	up := repo.Upstream{Commit: "572cce5eb41fbdfce9e27017e6183deed4cd624b", Version: "0.10.0"}
+	gen, err := g.Render(repo.Context{Upstream: up, Net: testIO()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gen.PKGBUILD, "#branch=main") {
+		t.Errorf("git package must build from the main branch:\n%s", gen.PKGBUILD)
+	}
+	if !strings.Contains(gen.PKGBUILD, "pkgver=0.10.0.r572cce5") {
+		t.Errorf("unexpected pkgver:\n%s", gen.PKGBUILD)
+	}
+	// No release-only fields may leak in.
+	if strings.Contains(gen.PKGBUILD, "releases/download") {
+		t.Error("git package must not reference release assets")
 	}
 }
 
 func TestBinRejectsBadDigest(t *testing.T) {
 	g := &binGen{}
-	up := repo.Upstream{Tag: "canary", Assets: canaryAssets()}
+	up := repo.Upstream{Tag: "canary", Version: "0.10.0", Assets: canaryAssets()}
 	bad := repo.Net{Digest: func(string, string) (string, error) { return "short", nil }}
 	if _, err := g.Render(repo.Context{Upstream: up, Net: bad}); err == nil {
 		t.Fatal("expected an error for a malformed sha256")
@@ -100,7 +154,7 @@ func TestBinRejectsBadDigest(t *testing.T) {
 
 func TestBinPkgrelPassedThrough(t *testing.T) {
 	g := &binGen{}
-	gen, err := g.Render(repo.Context{Upstream: repo.Upstream{Tag: "canary", Assets: canaryAssets()}, Pkgrel: 3, Net: testIO()})
+	gen, err := g.Render(repo.Context{Upstream: repo.Upstream{Tag: "canary", Version: "0.10.0", Assets: canaryAssets()}, Pkgrel: 3, Net: testIO()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,13 +168,13 @@ func TestBinPkgrelPassedThrough(t *testing.T) {
 
 func TestGitPkgverMatchesPkgverFunction(t *testing.T) {
 	g := &gitGen{}
-	up := repo.Upstream{Commit: "572cce5eb41fbdfce9e27017e6183deed4cd624b", Date: "20261024"}
+	up := repo.Upstream{Commit: "572cce5eb41fbdfce9e27017e6183deed4cd624b", Date: "20261024", Version: "0.10.0"}
 	ver, err := g.Pkgver(up)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ver != "20261024.r572cce5" {
-		t.Fatalf("pkgver=%q", ver)
+	if ver != "0.10.0.r572cce5" {
+		t.Fatalf("pkgver=%q want 0.10.0.r572cce5 (upstream version + commit)", ver)
 	}
 	gen, err := g.Render(repo.Context{Upstream: up, Net: testIO()})
 	if err != nil {
@@ -131,10 +185,15 @@ func TestGitPkgverMatchesPkgverFunction(t *testing.T) {
 	if !strings.Contains(gen.PKGBUILD, "pkgver="+ver) {
 		t.Errorf("PKGBUILD does not carry %q:\n%s", ver, gen.PKGBUILD)
 	}
-	for _, frag := range []string{"TZ=UTC", "format-local:%Y%m%d", "rev-parse --short=7"} {
+	// pkgver() must rebuild the same string from the checked-out source: the
+	// version from package.json plus the same short commit.
+	for _, frag := range []string{"package.json", "rev-parse --short=7", `printf '%s.r%s`} {
 		if !strings.Contains(gen.PKGBUILD, frag) {
 			t.Errorf("pkgver() missing %q; it must reproduce %q", frag, ver)
 		}
+	}
+	if strings.Contains(gen.PKGBUILD, "TZ=UTC") {
+		t.Error("pkgver() should no longer derive the version from the commit date")
 	}
 }
 
@@ -158,7 +217,7 @@ func TestBinTracksCanaryTag(t *testing.T) {
 }
 
 func TestBothPackagesConflictWithEachOther(t *testing.T) {
-	up := repo.Upstream{Tag: "canary", Commit: "572cce5eb41fbdfce9e27017e6183deed4cd624b", Date: "20261024", Assets: canaryAssets()}
+	up := repo.Upstream{Tag: "canary", Commit: "572cce5eb41fbdfce9e27017e6183deed4cd624b", Date: "20261024", Version: "0.10.0", Assets: canaryAssets()}
 
 	bin, err := (&binGen{}).Render(repo.Context{Upstream: up, Net: testIO()})
 	if err != nil {
@@ -202,7 +261,7 @@ func TestNoRealAliasPackageIsPublished(t *testing.T) {
 }
 
 func TestSrcinfoListsOneValuePerLine(t *testing.T) {
-	gen, err := (&binGen{}).Render(repo.Context{Upstream: repo.Upstream{Tag: "canary", Assets: canaryAssets()}, Net: testIO()})
+	gen, err := (&binGen{}).Render(repo.Context{Upstream: repo.Upstream{Tag: "canary", Version: "0.10.0", Assets: canaryAssets()}, Net: testIO()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +282,7 @@ func TestSrcinfoListsOneValuePerLine(t *testing.T) {
 }
 
 func TestGitSrcinfoUsesArchIndependentSource(t *testing.T) {
-	gen, err := (&gitGen{}).Render(repo.Context{Upstream: repo.Upstream{Commit: "572cce5eb41fbdfce9e27017e6183deed4cd624b", Date: "20261024"}, Net: testIO()})
+	gen, err := (&gitGen{}).Render(repo.Context{Upstream: repo.Upstream{Commit: "572cce5eb41fbdfce9e27017e6183deed4cd624b", Date: "20261024", Version: "0.10.0"}, Net: testIO()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,10 +307,11 @@ func TestGitSrcinfoUsesArchIndependentSource(t *testing.T) {
 // cannot work on its own, so package() must delete it.
 func TestBundledAria2cIsNotInstalled(t *testing.T) {
 	up := repo.Upstream{
-		Tag:    "canary",
-		Commit: "572cce5eb41fbdfce9e27017e6183deed4cd624b",
-		Date:   "20261024",
-		Assets: canaryAssets(),
+		Tag:     "canary",
+		Commit:  "572cce5eb41fbdfce9e27017e6183deed4cd624b",
+		Date:    "20261024",
+		Version: "0.10.0",
+		Assets:  canaryAssets(),
 	}
 	for name, g := range map[string]repo.Generator{
 		"bin": &binGen{},
@@ -284,7 +344,7 @@ func TestQuotingSurvivesShell(t *testing.T) {
 	}
 	for _, d := range nasty {
 		gen, err := (&binGen{}).Render(repo.Context{
-			Upstream: repo.Upstream{Tag: "canary", Assets: canaryAssets(), Description: d},
+			Upstream: repo.Upstream{Tag: "canary", Version: "0.10.0", Assets: canaryAssets(), Description: d},
 			Net:      testIO(),
 		})
 		if err != nil {
@@ -322,6 +382,7 @@ func TestPkgdescComesFromUpstream(t *testing.T) {
 		Tag:         "canary",
 		Commit:      "572cce5eb41fbdfce9e27017e6183deed4cd624b",
 		Date:        "20261024",
+		Version:     "0.10.0",
 		Assets:      canaryAssets(),
 		Description: about,
 	}
@@ -341,7 +402,7 @@ func TestPkgdescComesFromUpstream(t *testing.T) {
 
 func TestPkgdescSanitisedToSingleLine(t *testing.T) {
 	gen, err := (&binGen{}).Render(repo.Context{
-		Upstream: repo.Upstream{Tag: "canary", Assets: canaryAssets(), Description: "line one\n  line two\ttabbed  "},
+		Upstream: repo.Upstream{Tag: "canary", Version: "0.10.0", Assets: canaryAssets(), Description: "line one\n  line two\ttabbed  "},
 		Net:      testIO(),
 	})
 	if err != nil {
@@ -358,7 +419,7 @@ func TestPkgdescSanitisedToSingleLine(t *testing.T) {
 
 func TestEmptyDescriptionFallsBack(t *testing.T) {
 	gen, err := (&binGen{}).Render(repo.Context{
-		Upstream: repo.Upstream{Tag: "canary", Assets: canaryAssets()},
+		Upstream: repo.Upstream{Tag: "canary", Version: "0.10.0", Assets: canaryAssets()},
 		Net:      testIO(),
 	})
 	if err != nil {

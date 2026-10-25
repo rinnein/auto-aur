@@ -3,10 +3,12 @@
 package github
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -21,6 +23,65 @@ type Release struct {
 	Message     string  `json:"message"` // populated by API error responses
 }
 
+// Version extracts the upstream version a release represents.
+//
+// A rolling tag (the same tag rebuilt for every commit) cannot carry the
+// version, so upstream records it in the release name and body instead:
+//
+//	name: "canary v0.10.0"   body: "版本：0.10.0"
+//
+// Both are checked, then the tag itself for repositories that tag per version.
+// Assets are deliberately not consulted: a filename can go stale (the .deb in
+// this very repository once said 0.10.0 while its control file said 0.9.9).
+func (r *Release) Version() (string, error) {
+	candidates := []string{}
+	if v := versionFromName(r.Name); v != "" {
+		candidates = append(candidates, v)
+	}
+	if v := versionFromBody(r.Body); v != "" {
+		candidates = append(candidates, v)
+	}
+	if v := versionFromTag(r.TagName); v != "" {
+		candidates = append(candidates, v)
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("github: cannot determine a version from release %q (name %q)", r.TagName, r.Name)
+	}
+	return candidates[0], nil
+}
+
+var semanticVersion = regexp.MustCompile(`\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.]+)?`)
+
+// versionFromName pulls the version out of a release name such as
+// "canary v0.10.0" or "v1.2.3".
+func versionFromName(name string) string {
+	return semanticVersion.FindString(name)
+}
+
+// versionFromBody looks for an explicit "版本：X" / "version: X" line.
+func versionFromBody(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		lower := strings.ToLower(line)
+		if !strings.Contains(lower, "版本") && !strings.Contains(lower, "version") {
+			continue
+		}
+		if v := semanticVersion.FindString(line); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// versionFromTag accepts tags that are themselves a version, optionally v
+// prefixed. Rolling tags such as "canary" yield "".
+func versionFromTag(tag string) string {
+	trimmed := strings.TrimPrefix(tag, "v")
+	if semanticVersion.FindString(trimmed) == trimmed && trimmed != "" {
+		return trimmed
+	}
+	return ""
+}
+
 // Asset is a downloadable release artefact.
 type Asset struct {
 	ID                 int64  `json:"id"`
@@ -28,6 +89,23 @@ type Asset struct {
 	BrowserDownloadURL string `json:"browser_download_url"`
 	Size               int64  `json:"size"`
 	UpdatedAt          string `json:"updated_at"`
+	// Digest is "sha256:<hex>" as computed by GitHub when the asset was
+	// uploaded. It lets the package checksum be read at run time instead of
+	// downloading the artefact; older assets may leave it empty.
+	Digest string `json:"digest"`
+	State  string `json:"state"`
+}
+
+// SHA256 returns the sha256 from Digest, or "" when absent.
+func (a Asset) SHA256() string {
+	const prefix = "sha256:"
+	if strings.HasPrefix(a.Digest, prefix) {
+		sum := strings.TrimPrefix(a.Digest, prefix)
+		if len(sum) == 64 {
+			return sum
+		}
+	}
+	return ""
 }
 
 // Repository mirrors the fields of GET /repos/{owner}/{repo} that auto-aur
@@ -50,6 +128,43 @@ func (c *Client) RepoInfo(repo string) (*Repository, error) {
 		return nil, fmt.Errorf("github: decode repo %s: %w", repo, err)
 	}
 	return &r, nil
+}
+
+// FileVersion reads package.json at ref and returns its "version" field.
+//
+// VCS packages build from a branch, so there is no release to name a version;
+// the branch's own package.json is the authority, and the PKGBUILD pkgver()
+// reads the same file so the two cannot drift.
+func (c *Client) FileVersion(repo, ref, path string) (string, error) {
+	body, err := c.fetchRaw(fmt.Sprintf("/repos/%s/contents/%s?ref=%s", repo, path, ref))
+	if err != nil {
+		return "", err
+	}
+	var file struct {
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}
+	if err := json.Unmarshal(body, &file); err != nil {
+		return "", fmt.Errorf("github: decode %s@%s: %w", path, ref, err)
+	}
+	raw := file.Content
+	if file.Encoding == "base64" {
+		decoded, derr := base64.StdEncoding.DecodeString(strings.ReplaceAll(raw, "\n", ""))
+		if derr != nil {
+			return "", fmt.Errorf("github: decode %s@%s content: %w", path, ref, derr)
+		}
+		raw = string(decoded)
+	}
+	var manifest struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
+		return "", fmt.Errorf("github: parse %s@%s: %w", path, ref, err)
+	}
+	if manifest.Version == "" {
+		return "", fmt.Errorf("github: %s@%s has no version field", path, ref)
+	}
+	return manifest.Version, nil
 }
 
 // Commit identifies a branch head.

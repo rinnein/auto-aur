@@ -23,9 +23,8 @@ type binGen struct{}
 func (g *binGen) Pkgname() string { return pkgBin }
 
 func (g *binGen) Wanted() repo.Wanted {
-	// The canary tag is reused for every build, so its tag never changes; the
-	// version comes from the asset filename and the fingerprint from the
-	// release metadata.
+	// The canary tag is reused for every build, so the tag alone says nothing
+	// about the version; Upstream.Version carries what the release declares.
 	return repo.Wanted{Repo: upstreamRepo, Tag: releaseTag, RepoDescription: true}
 }
 
@@ -34,8 +33,8 @@ func (g *binGen) WithMaintainer(m string, _ conf.Overrides) repo.Generator {
 	return g
 }
 
-// debAsset picks the x86_64 .deb and returns its version.
-func (g *binGen) debAsset(up repo.Upstream) (repo.Asset, string, error) {
+// debAsset picks the x86_64 .deb from the release.
+func (g *binGen) debAsset(up repo.Upstream) (repo.Asset, error) {
 	for _, a := range up.Assets {
 		if !strings.HasSuffix(a.Name, ".deb") {
 			continue
@@ -43,33 +42,52 @@ func (g *binGen) debAsset(up repo.Upstream) (repo.Asset, string, error) {
 		if !strings.Contains(a.Name, "linux_x64") {
 			continue
 		}
-		ver, ok := versionFromAsset(a.Name)
-		if !ok {
-			return repo.Asset{}, "", fmt.Errorf("szulife: cannot read a version from asset %q", a.Name)
-		}
-		return a, ver, nil
+		return a, nil
 	}
-	return repo.Asset{}, "", fmt.Errorf("szulife: release %s has no linux_x64 .deb asset", up.Tag)
+	return repo.Asset{}, fmt.Errorf("szulife: release %s has no linux_x64 .deb asset", up.Tag)
 }
 
+// Pkgver takes the version the release declares. It is resolved at run time
+// from the release itself (name/body written by the upstream CI, falling back
+// to the asset filename), never from a constant in this file.
 func (g *binGen) Pkgver(up repo.Upstream) (string, error) {
-	_, ver, err := g.debAsset(up)
-	return ver, err
+	if up.Version != "" {
+		return up.Version, nil
+	}
+	asset, err := g.debAsset(up)
+	if err != nil {
+		return "", err
+	}
+	if ver, ok := versionFromAsset(asset.Name); ok {
+		return ver, nil
+	}
+	return "", fmt.Errorf("szulife: cannot determine a version for release %s", up.Tag)
 }
 
 func (g *binGen) Render(ctx repo.Context) (repo.Generated, error) {
-	asset, ver, err := g.debAsset(ctx.Upstream)
+	asset, err := g.debAsset(ctx.Upstream)
 	if err != nil {
 		return repo.Generated{}, err
 	}
-	if ctx.Net.Digest == nil {
-		return repo.Generated{}, fmt.Errorf("szulife: no digest helper configured")
-	}
-	// The release ships no checksum file, so the .deb is streamed once to
-	// compute its sha256. This is required for a trustworthy -bin package.
-	sum, err := ctx.Net.Digest(asset.URL, "sha256")
+	// pkgver is the version the release declares, never something parsed out of
+	// an asset filename.
+	ver, err := g.Pkgver(ctx.Upstream)
 	if err != nil {
-		return repo.Generated{}, fmt.Errorf("szulife: checksum %s: %w", asset.Name, err)
+		return repo.Generated{}, err
+	}
+	// The checksum comes from the release at run time. GitHub records a digest
+	// when the asset is uploaded, so normally it is read straight from the API;
+	// only when that is missing is the .deb streamed to hash it.
+	sum := asset.SHA256
+	if sum == "" {
+		if ctx.Net.Digest == nil {
+			return repo.Generated{}, fmt.Errorf("szulife: %s has no digest and no digest helper is configured", asset.Name)
+		}
+		computed, derr := ctx.Net.Digest(asset.URL, "sha256")
+		if derr != nil {
+			return repo.Generated{}, fmt.Errorf("szulife: checksum %s: %w", asset.Name, derr)
+		}
+		sum = computed
 	}
 	if len(sum) != 64 {
 		return repo.Generated{}, fmt.Errorf("szulife: unexpected sha256 %q for %s", sum, asset.Name)
@@ -127,7 +145,15 @@ type gitGen struct{}
 func (g *gitGen) Pkgname() string { return pkgGit }
 
 func (g *gitGen) Wanted() repo.Wanted {
-	return repo.Wanted{Repo: upstreamRepo, Branch: "main", RepoDescription: true}
+	return repo.Wanted{
+		Repo:            upstreamRepo,
+		Branch:          "main",
+		RepoDescription: true,
+		// A VCS package is defined by its branch, not by a release: the version
+		// is read from package.json on that branch and pkgver() reads the same
+		// file at build time, so the two cannot drift.
+		VersionFile: "package.json",
+	}
 }
 
 func (g *gitGen) WithMaintainer(m string, _ conf.Overrides) repo.Generator {
@@ -135,20 +161,24 @@ func (g *gitGen) WithMaintainer(m string, _ conf.Overrides) repo.Generator {
 	return g
 }
 
-// gitPkgver mirrors the pkgver() function: <UTC commit date>.r<short sha>.
+// gitPkgver mirrors the pkgver() function: <pkgsrc version>.r<short sha>.
+//
+// Everything here comes from the tracked branch: Upstream.Version is read from
+// that branch's package.json and Upstream.Commit is its head, so the package
+// tracks main directly with no dependency on any release. pkgver() rebuilds the
+// same string from the checkout, so makepkg agrees with what was published.
 func gitPkgver(up repo.Upstream) (string, error) {
 	if up.Commit == "" {
 		return "", fmt.Errorf("szulife: branch head has no commit")
 	}
-	date := up.Date
-	if date == "" {
-		return "", fmt.Errorf("szulife: branch head has no commit date")
+	if up.Version == "" {
+		return "", fmt.Errorf("szulife: the tracked branch has no version in package.json")
 	}
 	short := up.Commit
 	if len(short) > 7 {
 		short = short[:7]
 	}
-	return fmt.Sprintf("%s.r%s", date, short), nil
+	return fmt.Sprintf("%s.r%s", up.Version, short), nil
 }
 
 func (g *gitGen) Pkgver(up repo.Upstream) (string, error) { return gitPkgver(up) }
@@ -172,10 +202,15 @@ func (g *gitGen) Render(ctx repo.Context) (repo.Generated, error) {
 	b.WriteString(`
 pkgver() {
   cd "$srcdir/$pkgname"
-  # Must agree with the version auto-aur publishes: UTC date + short sha.
-  printf '%s.r%s\n' \
-    "$(TZ=UTC git log -1 --date=format-local:%Y%m%d --format=%cd)" \
-    "$(git rev-parse --short=7 HEAD)"
+  # Must agree with the version auto-aur publishes: the upstream version from
+  # package.json plus the commit, so a rebuild never silently disagrees.
+  local ver
+  ver=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' package.json | head -n1)
+  if [[ -z "${ver}" ]]; then
+    error "cannot read the version from package.json"
+    return 1
+  fi
+  printf '%s.r%s\n' "${ver}" "$(git rev-parse --short=7 HEAD)"
 }
 
 build() {

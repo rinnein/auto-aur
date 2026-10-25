@@ -34,6 +34,11 @@ func (f *fakeGen) Pkgver(up repo.Upstream) (string, error) {
 	if f.err != nil {
 		return "", f.err
 	}
+	// The app fills Version from the release; fall back to the tag so tests that
+	// only care about other behaviour stay readable.
+	if up.Version != "" {
+		return up.Version, nil
+	}
 	return strings.ReplaceAll(up.Tag, "-", "_"), nil
 }
 
@@ -42,7 +47,10 @@ func (f *fakeGen) Render(ctx repo.Context) (repo.Generated, error) {
 	if f.err != nil {
 		return repo.Generated{}, f.err
 	}
-	ver := strings.ReplaceAll(ctx.Upstream.Tag, "-", "_")
+	ver := ctx.Upstream.Version
+	if ver == "" {
+		ver = strings.ReplaceAll(ctx.Upstream.Tag, "-", "_")
+	}
 	pkgrel := ctx.Pkgrel
 	if pkgrel == 0 {
 		pkgrel = 1
@@ -297,7 +305,7 @@ func TestFailureDoesNotStopOtherTasks(t *testing.T) {
 
 	// One fetcher per task: route by repo is unnecessary because each fake
 	// renders deterministically, so a single fetcher is enough.
-	deps := Deps{Fetch: &fakeFetcher{rel: github.Release{TagName: "v1"}}, Publish: &fakePublisher{}}
+	deps := Deps{Fetch: &fakeFetcher{rel: github.Release{TagName: "v1.0.0"}}, Publish: &fakePublisher{}}
 	results, err := Run(Options{ConfPath: confPath, OutDir: filepath.Join(dir, "out")}, deps)
 	if err == nil {
 		t.Fatal("expected an aggregated error")
@@ -379,11 +387,17 @@ func (g *overridableGen) WithMaintainer(m string, o conf.Overrides) repo.Generat
 }
 
 func (g *overridableGen) Pkgver(up repo.Upstream) (string, error) {
+	if up.Version != "" {
+		return up.Version, nil
+	}
 	return strings.ReplaceAll(up.Tag, "-", "_"), nil
 }
 
 func (g *overridableGen) Render(ctx repo.Context) (repo.Generated, error) {
-	ver := strings.ReplaceAll(ctx.Upstream.Tag, "-", "_")
+	ver := ctx.Upstream.Version
+	if ver == "" {
+		ver = strings.ReplaceAll(ctx.Upstream.Tag, "-", "_")
+	}
 	pkgrel := ctx.Pkgrel
 	if pkgrel == 0 {
 		pkgrel = 1
@@ -589,7 +603,7 @@ func TestRebuiltAssetBumpsPkgrel(t *testing.T) {
 	if lock.Pkgrel != 2 {
 		t.Fatalf("pkgrel=%d want 2 after a republished release", lock.Pkgrel)
 	}
-	if lock.Pkgver != "v1.0.0" {
+	if lock.Pkgver != "1.0.0" {
 		t.Fatalf("pkgver changed unexpectedly: %q", lock.Pkgver)
 	}
 }
@@ -641,7 +655,8 @@ func TestLockIsReadFromPreparedCheckout(t *testing.T) {
 
 	pub := &recordingPublisher{outDir: outDir, pkgbase: pkgbase}
 	// Pretend a previous run published v1.0.0 with the same fingerprint.
-	pub.lock = `{"pkgver":"v1.0.0","pkgrel":1,"fingerprint":"v1.0.0|same"}`
+	fp := ReleaseFingerprint(&github.Release{TagName: "v1.0.0", PublishedAt: "same"})
+	pub.lock = `{"pkgver":"1.0.0","pkgrel":1,"fingerprint":"` + fp + `"}`
 	deps := Deps{
 		Fetch:   &fakeFetcher{rel: github.Release{TagName: "v1.0.0", PublishedAt: "same"}},
 		Publish: pub,
@@ -737,7 +752,7 @@ func (g *descGen) Pkgname() string { return g.pkgname }
 func (g *descGen) Wanted() repo.Wanted {
 	return repo.Wanted{Repo: "example/demo", RepoDescription: true}
 }
-func (g *descGen) Pkgver(up repo.Upstream) (string, error) { return up.Tag, nil }
+func (g *descGen) Pkgver(up repo.Upstream) (string, error) { return up.Version, nil }
 func (g *descGen) Render(ctx repo.Context) (repo.Generated, error) {
 	rel := ctx.Pkgrel
 	if rel == 0 {
@@ -747,9 +762,9 @@ func (g *descGen) Render(ctx repo.Context) (repo.Generated, error) {
 	if desc == "" {
 		desc = "fallback"
 	}
-	src := "pkgname=" + g.pkgname + "\npkgver=" + ctx.Upstream.Tag + "\npkgdesc=\"" + desc + "\"\n"
+	src := "pkgname=" + g.pkgname + "\npkgver=" + ctx.Upstream.Version + "\npkgdesc=\"" + desc + "\"\n"
 	return repo.Generated{
-		Pkgname: g.pkgname, Pkgver: ctx.Upstream.Tag, Pkgrel: rel,
+		Pkgname: g.pkgname, Pkgver: ctx.Upstream.Version, Pkgrel: rel,
 		PKGBUILD:    src,
 		Srcinfo:     "pkgbase = " + g.pkgname + "\n\tpkgdesc = " + desc + "\n",
 		Fields:      pkgbuild.Parse(src),
@@ -772,7 +787,7 @@ func TestDescriptionChangeBumpsPkgrel(t *testing.T) {
 	outDir := filepath.Join(dir, "out")
 	repos := &fakeRepos{description: "first description"}
 	deps := Deps{
-		Fetch:   &fakeFetcher{rel: github.Release{TagName: "v1", PublishedAt: "same"}},
+		Fetch:   &fakeFetcher{rel: github.Release{TagName: "v1.0.0", PublishedAt: "same"}},
 		Repos:   repos,
 		Publish: &fakePublisher{},
 	}
@@ -825,7 +840,7 @@ func TestDescriptionFetchFailureFailsTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	deps := Deps{
-		Fetch:   &fakeFetcher{rel: github.Release{TagName: "v1"}},
+		Fetch:   &fakeFetcher{rel: github.Release{TagName: "v1.0.0"}},
 		Repos:   &fakeRepos{err: os.ErrPermission},
 		Publish: &fakePublisher{},
 	}

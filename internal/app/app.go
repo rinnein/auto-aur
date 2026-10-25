@@ -40,6 +40,11 @@ type BranchReader interface {
 	BranchHead(repo, branch string) (*github.Commit, error)
 }
 
+// FileReader resolves a file at a ref, used for the version of VCS packages.
+type FileReader interface {
+	FileVersion(repo, ref, path string) (string, error)
+}
+
 // RepoReader resolves repository metadata, used for the About description.
 type RepoReader interface {
 	RepoInfo(repo string) (*github.Repository, error)
@@ -69,6 +74,7 @@ type PublishRequest struct {
 type Deps struct {
 	Fetch    Fetcher
 	Branches BranchReader
+	Files    FileReader
 	Repos    RepoReader
 	Lookup   Lookup
 	Publish  Publisher
@@ -335,6 +341,17 @@ func resolveUpstream(w repo.Wanted, deps Deps) (repo.Upstream, error) {
 			Date:        utcDate(head.Info.Committer.Date),
 			Fingerprint: head.SHA,
 		}
+		// A branch has no release to name a version, so take it from the tree.
+		if w.VersionFile != "" {
+			if deps.Files == nil {
+				return repo.Upstream{}, fmt.Errorf("task tracks %s but no file reader is configured", w.VersionFile)
+			}
+			version, verr := deps.Files.FileVersion(w.Repo, w.Branch, w.VersionFile)
+			if verr != nil {
+				return repo.Upstream{}, verr
+			}
+			up.Version = version
+		}
 		if err := addDescription(&up, w, deps); err != nil {
 			return repo.Upstream{}, err
 		}
@@ -347,12 +364,19 @@ func resolveUpstream(w repo.Wanted, deps Deps) (repo.Upstream, error) {
 	if err != nil {
 		return repo.Upstream{}, err
 	}
+	// The version comes from the release itself. Deriving it from an asset
+	// filename would freeze the package whenever upstream forgets to rename.
+	version, err := rel.Version()
+	if err != nil {
+		return repo.Upstream{}, err
+	}
 	up := repo.Upstream{
 		Tag:         rel.TagName,
 		Commit:      commitFromRelease(rel),
 		Date:        utcDate(rel.PublishedAt),
 		Assets:      toRepoAssets(rel.Assets),
-		Fingerprint: releaseFingerprint(rel),
+		Version:     version,
+		Fingerprint: ReleaseFingerprint(rel),
 	}
 	if err := addDescription(&up, w, deps); err != nil {
 		return repo.Upstream{}, err
@@ -378,10 +402,14 @@ func addDescription(up *repo.Upstream, w repo.Wanted, deps Deps) error {
 	return nil
 }
 
-// releaseFingerprint changes when the release is republished or any asset is
-// replaced in place, which is exactly what a rolling "canary" tag does.
-func releaseFingerprint(rel *github.Release) string {
-	parts := []string{rel.TagName, rel.PublishedAt}
+// ReleaseFingerprint identifies the exact upstream state behind a release. It is
+// exported so tests can build the same string instead of hardcoding a format.
+//
+// A rolling tag keeps its name, so neither the tag nor (for a rebuilt release)
+// the publication time is a reliable signal. The commit recorded in the body
+// and the per-asset metadata are what actually move.
+func ReleaseFingerprint(rel *github.Release) string {
+	parts := []string{rel.TagName, rel.PublishedAt, commitFromRelease(rel)}
 	for _, a := range rel.Assets {
 		parts = append(parts, fmt.Sprintf("%s:%d:%s", a.Name, a.Size, a.UpdatedAt))
 	}
@@ -429,7 +457,12 @@ func metadataDiff(path string, fresh pkgbuild.Fields) []string {
 func toRepoAssets(in []github.Asset) []repo.Asset {
 	out := make([]repo.Asset, 0, len(in))
 	for _, a := range in {
-		out = append(out, repo.Asset{Name: a.Name, URL: a.BrowserDownloadURL})
+		out = append(out, repo.Asset{
+			Name:   a.Name,
+			URL:    a.BrowserDownloadURL,
+			Size:   a.Size,
+			SHA256: a.SHA256(),
+		})
 	}
 	return out
 }

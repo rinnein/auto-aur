@@ -106,7 +106,8 @@ func TestE2ECreateThenUpdate(t *testing.T) {
 	}
 
 	remotePkgbuild := runGit(t, root, "--git-dir", remoteDir, "show", "master:PKGBUILD")
-	if !strings.Contains(remotePkgbuild, "pkgver=v2.0.0") {
+	// The version is the release version ("v2.0.0" tag -> "2.0.0" pkgver).
+	if !strings.Contains(remotePkgbuild, "pkgver=2.0.0") {
 		t.Fatalf("remote PKGBUILD not updated:\n%s", remotePkgbuild)
 	}
 	if !strings.Contains(remotePkgbuild, "# Maintainer: Alice <alice@example.invalid>") {
