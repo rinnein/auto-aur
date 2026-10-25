@@ -2,7 +2,7 @@
 
 自动把 GitHub Release 发布到 AUR 的框架。用 Go 编写，由 GitHub Actions 定时驱动。
 
-当前内置任务（`repo/szulife/`），对应 [rinnein/your-szu-life](https://github.com/rinnein/your-szu-life)：
+当前内置任务（`repo/your-szu-life/`），对应 [rinnein/your-szu-life](https://github.com/rinnein/your-szu-life)：
 
 | 任务 | 包名 | 来源 |
 | --- | --- | --- |

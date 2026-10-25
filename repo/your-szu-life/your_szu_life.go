@@ -1,4 +1,4 @@
-package szulife
+package yourszulife
 
 import (
 	"fmt"
@@ -44,7 +44,7 @@ func (g *binGen) debAsset(up repo.Upstream) (repo.Asset, error) {
 		}
 		return a, nil
 	}
-	return repo.Asset{}, fmt.Errorf("szulife: release %s has no linux_x64 .deb asset", up.Tag)
+	return repo.Asset{}, fmt.Errorf("your-szu-life: release %s has no linux_x64 .deb asset", up.Tag)
 }
 
 // Pkgver takes the version the release declares. It is resolved at run time
@@ -61,7 +61,7 @@ func (g *binGen) Pkgver(up repo.Upstream) (string, error) {
 	if ver, ok := versionFromAsset(asset.Name); ok {
 		return ver, nil
 	}
-	return "", fmt.Errorf("szulife: cannot determine a version for release %s", up.Tag)
+	return "", fmt.Errorf("your-szu-life: cannot determine a version for release %s", up.Tag)
 }
 
 func (g *binGen) Render(ctx repo.Context) (repo.Generated, error) {
@@ -81,16 +81,16 @@ func (g *binGen) Render(ctx repo.Context) (repo.Generated, error) {
 	sum := asset.SHA256
 	if sum == "" {
 		if ctx.Net.Digest == nil {
-			return repo.Generated{}, fmt.Errorf("szulife: %s has no digest and no digest helper is configured", asset.Name)
+			return repo.Generated{}, fmt.Errorf("your-szu-life: %s has no digest and no digest helper is configured", asset.Name)
 		}
 		computed, derr := ctx.Net.Digest(asset.URL, "sha256")
 		if derr != nil {
-			return repo.Generated{}, fmt.Errorf("szulife: checksum %s: %w", asset.Name, derr)
+			return repo.Generated{}, fmt.Errorf("your-szu-life: checksum %s: %w", asset.Name, derr)
 		}
 		sum = computed
 	}
 	if len(sum) != 64 {
-		return repo.Generated{}, fmt.Errorf("szulife: unexpected sha256 %q for %s", sum, asset.Name)
+		return repo.Generated{}, fmt.Errorf("your-szu-life: unexpected sha256 %q for %s", sum, asset.Name)
 	}
 
 	pkgrel := ctx.Pkgrel
@@ -169,10 +169,10 @@ func (g *gitGen) WithMaintainer(m string, _ conf.Overrides) repo.Generator {
 // same string from the checkout, so makepkg agrees with what was published.
 func gitPkgver(up repo.Upstream) (string, error) {
 	if up.Commit == "" {
-		return "", fmt.Errorf("szulife: branch head has no commit")
+		return "", fmt.Errorf("your-szu-life: branch head has no commit")
 	}
 	if up.Version == "" {
-		return "", fmt.Errorf("szulife: the tracked branch has no version in package.json")
+		return "", fmt.Errorf("your-szu-life: the tracked branch has no version in package.json")
 	}
 	short := up.Commit
 	if len(short) > 7 {

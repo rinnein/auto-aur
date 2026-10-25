@@ -1,4 +1,4 @@
-// Package szulife packages Your SZU Life (https://github.com/rinnein/your-szu-life),
+// Package yourszulife packages Your SZU Life (https://github.com/rinnein/your-szu-life),
 // a Tauri desktop app, for the AUR.
 //
 // Two packages are published from the same upstream:
@@ -14,7 +14,7 @@
 // list them as providers so the user picks one. No real package named
 // your-szu-life is published: such a package would shadow the providers and
 // remove the choice.
-package szulife
+package yourszulife
 
 import (
 	"fmt"
