@@ -1,0 +1,54 @@
+# 放到「上游仓库」（例如 rinnein/your-szu-life）的
+# .github/workflows/aur-release.yml：发布完 release 后自动拉起
+# rinnein/auto-aur，只更新该 release 对应的子包。
+#
+# 手工步骤只有一步：在上游仓库添加 secret `AUTO_AUR_TOKEN`，内容是一个对
+# rinnein/auto-aur 具有 "Actions: write" 的 fine-grained PAT（或 classic
+# token 的 `actions:write`）。之后每次发布都会自动触发。
+name: Publish to AUR
+
+on:
+  release:
+    # published：新建 release；edited：同一个 canary tag 被重新发布或资产
+    # 被替换时，滚动 tag 不会产生新的 release 事件，只有 edited 会变。
+    types: [published, edited]
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    # edited 可能连续触发多次，同一 tag 只保留最新一次派发。
+    concurrency:
+      group: aur-${{ github.event.release.tag_name }}
+      cancel-in-progress: true
+    steps:
+      - name: Dispatch auto-aur for this release
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_AUR_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+          SOURCE: ${{ github.repository }}
+        run: |
+          # 这个 release 由哪些子包消费，只有上游最清楚：canary 供 -bin 使用；
+          # 若以后为 -git 单独发布，把任务名追加进 tasks 即可。
+          # 空数组表示「整个上游的所有子包」，auto-aur 会按自己的 conf.json
+          # 决定具体是哪些。
+          case "$TAG" in
+            *-git) tasks='["your-szu-life-git"]' ;;
+            *)     tasks='["your-szu-life-bin"]' ;;
+          esac
+
+          # 只派发，不在这里判断版本：auto-aur 会用 lock.json 再次确认，
+          # 版本与内容都没变时什么都不会推送到 AUR。
+          jq -n \
+            --arg source "$SOURCE" \
+            --arg tag "$TAG" \
+            --argjson tasks "$tasks" \
+            '{event_type: "aur-release",
+              client_payload: {source: $source, tag: $tag,
+                               tasks: $tasks, force: false}}' \
+          | curl -sSf -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -d @- \
+              "https://api.github.com/repos/rinnein/auto-aur/dispatches"
+          echo "dispatched AUR publish for $SOURCE@$TAG ($tasks)"

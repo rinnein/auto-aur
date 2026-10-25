@@ -40,6 +40,68 @@ paru -S your-szu-life-git # 直接装源码构建版
 4. 把改动推到 AUR 的对应包仓库；**如果 AUR 上还没有这个包，会自动创建**。
 5. 写出 `out/update.sh`，由 workflow 最后一步统一执行。
 
+## 由上游的发布流程自动触发
+
+定时任务最多晚一天；如果你希望**上游发布完 release 的那一刻**就打 AUR，让上游
+workflow 反过来拉起本仓库即可。本仓库的 workflow 监听 `repository_dispatch`
+（事件类型 `aur-release`），payload 决定这次运行看哪些包：
+
+```json
+{
+  "event_type": "aur-release",
+  "client_payload": {
+    "source": "rinnein/your-szu-life",
+    "tasks": ["your-szu-life-bin"],
+    "tag": "canary",
+    "force": false
+  }
+}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `source` | 触发事件的上游仓库（`owner/name`，也接受完整 URL 或 `.git` 后缀）。该仓库**无任何任务跟踪**时整次运行是空操作。 |
+| `tasks` | 要发布的任务名，支持 `your-szu-life-*` 前缀；省略表示该上游的全部任务。 |
+| `tag` / `search` | 事件对应的 release。发布型任务只在自己确实打包这个 tag 时才会运行；`-git` 任务不看它，由 lock 文件决定是否有变化。 |
+| `force` | 忽略 `auto-aur.lock.json` 强制重发（等同于 `force_update`）。 |
+
+在别处触发：
+
+```sh
+# 用 curl 直接派发
+curl -sSf -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  https://api.github.com/repos/rinnein/auto-aur/dispatches \
+  -d '{"event_type":"aur-release","client_payload":{"source":"rinnein/your-szu-life","tasks":["your-szu-life-bin"],"tag":"canary"}}'
+
+# 或者用本仓库自带的客户端（自动读 GH_TOKEN，-dry-run 只打印）
+go run ./cmd/gh dispatch -repo rinnein/auto-aur \
+  -source rinnein/your-szu-life -tasks your-szu-life-bin -tag canary
+```
+
+`examples/upstream-aur-release.yml` 是一份可直接放进上游仓库的完整示例：
+`release: [published, edited]` 后派发，只发布该 tag 对应的子包。上游只需要加一个
+对 `rinnein/auto-aur` 有 `Actions: write` 的 token 作为 secret。
+
+`-git` 包每次都会看到新的 HEAD，所以从上游派发时通常只传 `your-szu-life-bin`；
+`-git` 交给每天的定时任务或另一次派发更省时间。
+
+**为什么 payload 不能凭空加包**：派发方只能从 `conf.json` 已启用的任务里选，
+不能引入新任务、新上游或新参数。`repo.RequireUpstream` 会复核任务跟踪的仓库与
+`source` 是否一致，所以一个针对 `attacker/fork` 的派发找不到任何可发布的包，
+只会安静地什么都不做。这个仓库的 `workflow_dispatch` 与定时任务不受影响，
+行为与以前完全一致。
+
+想先看看某次派发会选中什么，不碰 AUR：
+
+```sh
+auto-aur trigger -source rinnein/your-szu-life -tag canary   # 列出会被选中的任务
+auto-aur run -from-event -dry-run < event.json               # 只渲染，不写不推
+```
+
+`-from-event` 在有 `GITHUB_EVENT_PATH` 时读该文件，否则读 stdin。
+
 ## 用法
 
 ```sh
@@ -76,8 +138,10 @@ go build -o auto-aur .
 
 | 变量 | 用途 |
 | --- | --- |
-| `GH_TOKEN` / `GITHUB_TOKEN` | 可选。提高 GitHub API 限额；不设也能跑，但容易遇到 403 限流。 |
+| `GH_TOKEN` / `GITHUB_TOKEN` | 可选。提高 GitHub API 限额；不设也能跑，但容易遇到 403 限流。workflow 在未配置 `secrets.GH_TOKEN` 时回退到内置的 `github.token`。 |
 | `AUR_SSH_KEY`（通过 `secrets`） | workflow 把它写入 `~/.ssh/aur_key`，供 `Host aur.archlinux.org` 使用。 |
+| `GITHUB_EVENT_PATH` | 由 Actions 自动设置。`run -from-event` / `trigger -from-event` 优先读这个文件里的 dispatch payload。 |
+| `GH_REPOSITORY` | `cmd/gh` 的目标仓库默认值（`owner/name`），Actions 里会自动注入。 |
 
 ## 新增一个任务
 
@@ -160,11 +224,12 @@ func (g *Generator) WithMaintainer(m string, o conf.Overrides) repo.Generator
 ## 目录结构
 
 ```
-main.go              CLI 入口
+main.go              CLI 入口（run / trigger / tasks）
+cmd/gh/              从别的 workflow 派发本仓库的客户端
 conf.json            任务配置
-repo/               任务注册表与 Generator 接口（不含具体包）
+repo/               任务注册表、Generator 接口、trigger 选择逻辑（不含具体包）
 internal/conf/      配置加载、校验、禁用判定
-internal/github/    release 读取
+internal/github/    release / 分支 / 仓库信息读取，以及 dispatch 派发
 internal/pkgbuild/  PKGBUILD 渲染与字段解析
 internal/aur/       RPC 查询 + 包仓库克隆/创建/推送
 internal/gitx/      git 调用封装

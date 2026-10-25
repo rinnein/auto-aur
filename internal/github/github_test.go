@@ -2,6 +2,7 @@ package github
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -186,5 +187,62 @@ func TestFileVersion(t *testing.T) {
 	}
 	if got != "0.10.0" {
 		t.Fatalf("version=%q", got)
+	}
+}
+
+func TestDispatchPostsEvent(t *testing.T) {
+	var got struct {
+		method, path, auth, ctype string
+		body                      map[string]any
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.method, got.path = r.Method, r.URL.Path
+		got.auth = r.Header.Get("Authorization")
+		got.ctype = r.Header.Get("Content-Type")
+		_ = json.NewDecoder(r.Body).Decode(&got.body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client(), Token: "t0ken"}
+	err := c.Dispatch("owner/repo", "aur-release", map[string]any{"tasks": []string{"bin"}, "tag": "canary"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.method != http.MethodPost || got.path != "/repos/owner/repo/dispatches" {
+		t.Fatalf("unexpected request %s %s", got.method, got.path)
+	}
+	if got.auth != "Bearer t0ken" {
+		t.Fatalf("token missing from Authorization: %q", got.auth)
+	}
+	if !strings.Contains(got.ctype, "application/json") {
+		t.Fatalf("wrong content type %q", got.ctype)
+	}
+	if got.body["event_type"] != "aur-release" {
+		t.Fatalf("event_type=%v", got.body["event_type"])
+	}
+	payload, ok := got.body["client_payload"].(map[string]any)
+	if !ok || payload["tag"] != "canary" {
+		t.Fatalf("client_payload=%v", got.body["client_payload"])
+	}
+}
+
+func TestDispatchRejectsEmptyEvent(t *testing.T) {
+	c := New("")
+	if err := c.Dispatch("owner/repo", " ", nil); err == nil {
+		t.Fatal("an empty event type must be rejected before any request")
+	}
+}
+
+func TestDispatchReportsAPIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"message":"No ref found"}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	err := c.Dispatch("owner/repo", "aur-release", nil)
+	if err == nil || !strings.Contains(err.Error(), "No ref found") {
+		t.Fatalf("expected the API message, got %v", err)
 	}
 }

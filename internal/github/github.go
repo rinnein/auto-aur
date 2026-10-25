@@ -3,6 +3,7 @@
 package github
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -281,6 +282,31 @@ func (c *Client) search(repo, needle string) (*Release, error) {
 	return &picked[0], nil
 }
 
+// Dispatch starts a workflow in repo with a repository_dispatch event named
+// eventType, carrying payload in client_payload.
+//
+// This is how an external caller (another workflow, a release script) starts
+// auto-aur: the event wakes the workflows that list it under "on:
+// repository_dispatch", so no token has to be minted for this repository and
+// nothing needs to be checked out first.
+func (c *Client) Dispatch(repo, eventType string, payload map[string]any) error {
+	if strings.TrimSpace(eventType) == "" {
+		return fmt.Errorf("github: dispatch needs an event type")
+	}
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	body, err := json.Marshal(map[string]any{
+		"event_type":     eventType,
+		"client_payload": payload,
+	})
+	if err != nil {
+		return fmt.Errorf("github: encode dispatch for %s: %w", repo, err)
+	}
+	_, err = c.send(http.MethodPost, "/repos/"+repo+"/dispatches", body)
+	return err
+}
+
 func filterBy(in []Release, keep func(Release) bool) []Release {
 	var out []Release
 	for _, r := range in {
@@ -306,43 +332,61 @@ func (c *Client) get(path string) (*Release, error) {
 // fetchRaw performs a GET with retries for transient failures and turns API
 // error payloads into Go errors.
 func (c *Client) fetchRaw(path string) ([]byte, error) {
+	return c.send(http.MethodGet, path, nil)
+}
+
+// send issues one API request, retrying transient failures. body is the JSON
+// payload for methods that carry one; POSTs are not retried, because a repeat
+// could start a second workflow run.
+func (c *Client) send(method, path string, body []byte) ([]byte, error) {
 	url := c.BaseURL + path
+	attempts := 3
+	if method != http.MethodGet {
+		attempts = 1
+	}
 	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 {
 			time.Sleep(time.Duration(attempt) * time.Second)
 		}
-		req, err := http.NewRequest(http.MethodGet, url, nil)
+		var reader io.Reader
+		if body != nil {
+			reader = bytes.NewReader(body)
+		}
+		req, err := http.NewRequest(method, url, reader)
 		if err != nil {
 			return nil, fmt.Errorf("github: build request %s: %w", url, err)
 		}
 		req.Header.Set("Accept", "application/vnd.github+json")
 		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
 		if c.Token != "" {
 			req.Header.Set("Authorization", "Bearer "+c.Token)
 		}
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
-			lastErr = fmt.Errorf("github: GET %s: %w", url, err)
+			lastErr = fmt.Errorf("github: %s %s: %w", method, url, err)
 			continue
 		}
-		body, readErr := io.ReadAll(resp.Body)
+		raw, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if readErr != nil {
 			lastErr = fmt.Errorf("github: read %s: %w", url, readErr)
 			continue
 		}
 		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-			return nil, rateLimitErr(body)
+			return nil, rateLimitErr(raw)
 		}
 		if resp.StatusCode >= 500 {
-			lastErr = fmt.Errorf("github: GET %s: %s", url, resp.Status)
+			lastErr = fmt.Errorf("github: %s %s: %s", method, url, resp.Status)
 			continue
 		}
 		if resp.StatusCode >= 400 {
-			return nil, apiError(url, resp.Status, body)
+			return nil, apiError(method+" "+url, resp.Status, raw)
 		}
-		return body, nil
+		return raw, nil
 	}
 	return nil, lastErr
 }
@@ -355,10 +399,10 @@ func rateLimitErr(body []byte) error {
 	return ErrRateLimited
 }
 
-func apiError(url, status string, body []byte) error {
+func apiError(where, status string, body []byte) error {
 	var r Release
 	if json.Unmarshal(body, &r) == nil && r.Message != "" {
-		return fmt.Errorf("github: GET %s: %s: %s", url, status, r.Message)
+		return fmt.Errorf("github: %s: %s: %s", where, status, r.Message)
 	}
-	return fmt.Errorf("github: GET %s: %s", url, status)
+	return fmt.Errorf("github: %s: %s", where, status)
 }

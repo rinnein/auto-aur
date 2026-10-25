@@ -5,6 +5,13 @@ on:
     branches: [main]
   schedule:
     - cron: "0 0 * * *" # 每天0点执行
+  # 由其它仓库的 workflow 通过 repository_dispatch 拉起，例如上游发布完
+  # release 之后只更新对应的子包。payload 只用来「缩小范围」，不能凭空
+  # 引入 conf.json 里没有的任务：
+  #   {"client_payload": {"source": "owner/repo", "tasks": ["pkg-bin"],
+  #                       "tag": "canary", "force": false}}
+  repository_dispatch:
+    types: [aur-release]
   workflow_dispatch:
     inputs:
       force_update:
@@ -22,8 +29,42 @@ jobs:
   build:
     name: Auto AUR
     runs-on: ubuntu-latest
+    # One run per upstream at a time: two dispatches for the same repository
+    # would race on the same AUR checkout and both try to push.
+    concurrency:
+      group: auto-aur-${{ github.event.client_payload.source || 'all' }}
+      cancel-in-progress: false
 
     steps:
+      # The dispatch payload is attacker-controlled input, so it is only ever
+      # read through env vars (which the "run" script does not interpolate into
+      # its own source) and only ever selects from conf.json's enabled tasks.
+      - name: Resolve trigger
+        id: trigger
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SOURCE: ${{ github.event.client_payload.source }}
+          TASKS: ${{ github.event.client_payload.tasks }}
+          FORCE: ${{ github.event.client_payload.force }}
+          FORCE_INPUT: ${{ inputs.force_update }}
+        run: |
+          # Emit the CLI flags that narrow this run. A malformed payload fails
+          # this step alone, before any AUR checkout happens.
+          flags=()
+          case "$EVENT_NAME" in
+            repository_dispatch)
+              if [ -n "$SOURCE" ] || [ -n "$TASKS" ]; then
+                flags+=(-from-event)
+              fi
+              [ "$FORCE" = "true" ] && flags+=(-force)
+              ;;
+            workflow_dispatch)
+              [ "$FORCE_INPUT" = "true" ] && flags+=(-force)
+              ;;
+          esac
+          printf 'flags=%s\n' "${flags[*]:-}" >> "$GITHUB_OUTPUT"
+          printf 'auto-aur arguments: %s\n' "${flags[*]:-<none, run every task>}"
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -72,10 +113,14 @@ jobs:
         env:
           # Optional: raises the GitHub API rate limit. The workflow succeeds
           # without it, but unauthenticated quota is exhausted quickly.
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          TRIGGER_FLAGS: ${{ steps.trigger.outputs.flags }}
         run: |
           go build -trimpath -o "$RUNNER_TEMP/auto-aur" .
-          "$RUNNER_TEMP/auto-aur" run -v
+          # TRIGGER_FLAGS comes from the previous step and holds only the flags
+          # this workflow chose, never payload text. Word splitting is intended.
+          # shellcheck disable=SC2086
+          "$RUNNER_TEMP/auto-aur" run -v $TRIGGER_FLAGS
 
       - uses: addnab/docker-run-action@v3
         with:

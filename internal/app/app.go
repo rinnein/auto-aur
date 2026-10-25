@@ -24,9 +24,12 @@ type Options struct {
 	ConfPath string
 	OutDir   string
 	Only     string // restrict to one task
-	Force    bool   // ignore the lock file and metadata diff
-	DryRun   bool   // print instead of writing/pushing
-	NoCreate bool   // refuse to create missing AUR packages
+	// Trigger narrows the run to the tasks fed by the upstream an external
+	// caller named. A zero Trigger runs every configured task.
+	Trigger  repo.Trigger
+	Force    bool // ignore the lock file and metadata diff
+	DryRun   bool // print instead of writing/pushing
+	NoCreate bool // refuse to create missing AUR packages
 	Verbose  bool
 }
 
@@ -113,9 +116,39 @@ func Run(opts Options, deps Deps) ([]Result, error) {
 	remote := aur.Remote{Host: cfg.AUR.Host, User: cfg.AUR.User, Branch: cfg.AUR.Branch}
 	create := cfg.CreateMissing() && !opts.NoCreate
 
+	// A trigger from another workflow narrows the run to the packages it names.
+	// Nothing matching is not an error: a dispatch for a release that no
+	// configured package consumes must leave the AUR untouched rather than
+	// guess. The empty update.sh below is what keeps the workflow's
+	// unconditional "bash update.sh" a no-op.
+	selected := map[string]bool{}
+	if !opts.Trigger.IsZero() {
+		names, unknown := opts.Trigger.Select()
+		for _, n := range names {
+			selected[n] = true
+		}
+		if len(unknown) > 0 {
+			logf("trigger: no registered task matches %v", unknown)
+		}
+		if len(selected) == 0 {
+			logf("trigger: nothing matches repo=%q tasks=%v; nothing to do",
+				opts.Trigger.Source, opts.Trigger.Tasks)
+			if !opts.DryRun {
+				if err := writeUpdateScript(cfg, opts.OutDir, nil); err != nil {
+					return nil, err
+				}
+			}
+			return nil, nil
+		}
+	}
+
 	var results []Result
 	for _, p := range cfg.Packages {
 		if opts.Only != "" && p.Task != opts.Only {
+			continue
+		}
+		if len(selected) > 0 && !selected[p.Task] {
+			logf("skip %s: not selected by the trigger", p.Task)
 			continue
 		}
 		if reason := cfg.DisabledReason(p); reason != "" {
