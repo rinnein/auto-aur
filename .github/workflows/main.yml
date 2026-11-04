@@ -77,7 +77,11 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           SOURCE: ${{ github.event.client_payload.source }}
-          TASKS: ${{ github.event.client_payload.tasks }}
+          # env only accepts scalars, and the payload sends tasks as an array
+          # ("A sequence was not expected"). join() flattens it; tasks is
+          # absent on push/schedule and on an empty dispatch, and the || keeps
+          # that a "" rather than something join() has to reject.
+          TASKS: ${{ join(github.event.client_payload.tasks || '', ',') }}
           FORCE: ${{ github.event.client_payload.force }}
           FORCE_INPUT: ${{ inputs.force_update }}
         run: |
