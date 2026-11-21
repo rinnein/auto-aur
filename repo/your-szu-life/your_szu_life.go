@@ -106,9 +106,12 @@ func (g *binGen) Render(ctx repo.Context) (repo.Generated, error) {
 	// add an empty usr/src/debug tree.
 	b.WriteString("options=(" + quoteAll(binOptions) + ")\n")
 	// The filename is embedded so the source is reproducible and the version is
-	// visible in the download.
+	// visible in the download. The download itself comes from the CNB mirror;
+	// the checksum was resolved from the GitHub release, which serves the same
+	// bytes once the sync lands there.
+	debURL := fmt.Sprintf("%s/-/releases/download/%s/%s", cnbRepoURL, ctx.Upstream.Tag, asset.Name)
 	fmt.Fprintf(&b, "\n_debname=\"%s\"\n", asset.Name)
-	fmt.Fprintf(&b, "source_x86_64=(\"${_debname}::%s\")\n", asset.URL)
+	fmt.Fprintf(&b, "source_x86_64=(\"${_debname}::%s\")\n", debURL)
 	fmt.Fprintf(&b, "sha256sums_x86_64=('%s')\n", sum)
 	b.WriteString(`
 package() {
@@ -132,7 +135,7 @@ package() {
 		Pkgver:      ver,
 		Pkgrel:      pkgrel,
 		PKGBUILD:    src,
-		Srcinfo:     srcinfo(pkgBin, desc, ver, pkgrel, []extraFields{{Key: "options", Values: binOptions}}, []string{asset.Name + "::" + asset.URL}, []string{sum}, "x86_64"),
+		Srcinfo:     srcinfo(pkgBin, desc, ver, pkgrel, []extraFields{{Key: "options", Values: binOptions}}, []string{asset.Name + "::" + debURL}, []string{sum}, "x86_64"),
 		Fields:      pkgbuild.Parse(src),
 		Fingerprint: ctx.Upstream.Fingerprint,
 		Note:        note,
@@ -197,7 +200,9 @@ func (g *gitGen) Render(ctx repo.Context) (repo.Generated, error) {
 	var b strings.Builder
 	b.WriteString(commonHeader(pkgGit, ver, pkgrel, desc))
 	b.WriteString("makedepends=(" + quoteAll(gitMakedepends) + ")\n")
-	fmt.Fprintf(&b, "source=(\"$pkgname::git+https://github.com/%s.git#branch=main\")\n", upstreamRepo)
+	// Clone from the CNB mirror; the branch head and version the run publishes
+	// are still resolved from the GitHub repository.
+	fmt.Fprintf(&b, "source=(\"$pkgname::git+%s.git#branch=main\")\n", cnbRepoURL)
 	b.WriteString("sha256sums=('SKIP')\n")
 	b.WriteString(`
 pkgver() {
@@ -252,7 +257,7 @@ package() {
 		PKGBUILD: src,
 		Srcinfo: srcinfo(pkgGit, desc, ver, pkgrel,
 			[]extraFields{{Key: "makedepends", Values: gitMakedepends}},
-			[]string{pkgGit + "::git+https://github.com/" + upstreamRepo + ".git#branch=main"},
+			[]string{pkgGit + "::git+" + cnbRepoURL + ".git#branch=main"},
 			[]string{"SKIP"}, ""),
 		Fields:      pkgbuild.Parse(src),
 		Fingerprint: ctx.Upstream.Fingerprint,

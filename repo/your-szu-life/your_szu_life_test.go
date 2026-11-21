@@ -74,6 +74,8 @@ func TestBinPicksDebAndVersion(t *testing.T) {
 		"conflicts=('your-szu-life-git' 'your-szu-life')",
 		"sha256sums_x86_64=('" + testSum + "')",
 		"_debname=\"your-szu-life_linux_x64_0.10.0-release.deb\"",
+		// The download must come from the CNB mirror, not GitHub.
+		"source_x86_64=(\"${_debname}::https://cnb.cool/rinnein/szu/your-szu-life/-/releases/download/canary/your-szu-life_linux_x64_0.10.0-release.deb\")",
 	} {
 		if !strings.Contains(gen.PKGBUILD, want) {
 			t.Errorf("missing %q in PKGBUILD:\n%s", want, gen.PKGBUILD)
@@ -133,6 +135,13 @@ func TestGitDoesNotDependOnRelease(t *testing.T) {
 	}
 	if !strings.Contains(gen.PKGBUILD, "#branch=main") {
 		t.Errorf("git package must build from the main branch:\n%s", gen.PKGBUILD)
+	}
+	// The clone comes from the CNB mirror; GitHub is only the metadata source.
+	if !strings.Contains(gen.PKGBUILD, "git+https://cnb.cool/rinnein/szu/your-szu-life.git#branch=main") {
+		t.Errorf("git package must clone from the CNB mirror:\n%s", gen.PKGBUILD)
+	}
+	if strings.Contains(gen.PKGBUILD, "git+https://github.com") {
+		t.Errorf("git package source must not point at GitHub:\n%s", gen.PKGBUILD)
 	}
 	if !strings.Contains(gen.PKGBUILD, "pkgver=0.10.0.r572cce5") {
 		t.Errorf("unexpected pkgver:\n%s", gen.PKGBUILD)

@@ -39,6 +39,13 @@ const (
 	fallbackPkgdesc = "Shenzhen University campus life application"
 	pkgURL          = "https://github.com/rinnein/your-szu-life"
 
+	// cnbRepoURL is the CNB (cnb.cool) mirror of upstreamRepo. The published
+	// PKGBUILDs download from it so builds also work from mainland China;
+	// GitHub stays the metadata source: pkgver, the checksum and the branch
+	// head are still resolved from it at run time, and the mirror is kept in
+	// sync by the upstream github-sync workflow.
+	cnbRepoURL = "https://cnb.cool/rinnein/szu/your-szu-life"
+
 	// MIT per the repository LICENSE file. Upstream's own PKGBUILD says
 	// "unknown", which would fail AUR review.
 	licenseName = "MIT"
