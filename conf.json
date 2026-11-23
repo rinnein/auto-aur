@@ -8,7 +8,8 @@
   "createOnMissing": true,
   "packages": [
     { "task": "your-szu-life-bin" },
-    { "task": "your-szu-life-git" }
+    { "task": "your-szu-life-git" },
+    { "task": "openzwork-electron-bin" }
   ],
   "disabled": []
 }

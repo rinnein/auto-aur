@@ -20,6 +20,7 @@ import (
 	"github.com/rinnein/auto-aur/internal/conf"
 	"github.com/rinnein/auto-aur/internal/github"
 	"github.com/rinnein/auto-aur/repo"
+	_ "github.com/rinnein/auto-aur/repo/openzwork"     // register tasks
 	_ "github.com/rinnein/auto-aur/repo/your-szu-life" // register tasks
 )
 

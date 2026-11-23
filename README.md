@@ -2,7 +2,7 @@
 
 自动把 GitHub Release 发布到 AUR 的框架。用 Go 编写，由 GitHub Actions 定时驱动。
 
-当前内置任务（`repo/your-szu-life/`），对应 [rinnein/your-szu-life](https://github.com/rinnein/your-szu-life)：
+`repo/your-szu-life/` 打包 [rinnein/your-szu-life](https://github.com/rinnein/your-szu-life)：
 
 | 任务 | 包名 | 来源 |
 | --- | --- | --- |
@@ -27,6 +27,32 @@ paru -S your-szu-life-git # 直接装源码构建版
 ```
 
 **刻意不发布真正的 `your-szu-life` 包**：一个真实包名会遮蔽 provider 列表，`paru -S your-szu-life` 就变成直接安装它，用户失去选择权。
+
+### openzwork-electron-bin
+
+`repo/openzwork/` 打包 [BlueSkyXN/OpenZWork](https://github.com/BlueSkyXN/OpenZWork)：
+
+| 任务 | 包名 | 来源 |
+| --- | --- | --- |
+| `openzwork-electron-bin` | `openzwork-electron-bin` | 最新 release 的 `OpenZWork-<ver>-linux-x64.pkg.tar.zst` |
+
+包名按 AUR 习惯写全了两个含义：`-electron` 表示用发行版的 Electron 而不是自带运行时，
+`-bin` 表示重打包上游预编译产物（并非从源码构建）。
+
+打包方式参照 AUR 上的 `zcode-bin`：**不附带上游自带的 Electron**，而是 `depends=('electron44')`，
+用 `/usr/bin/openzwork` 启动 `app.asar`。`prepare()` 只保留 release 里的 `resources/`：
+
+- 把 `app.asar` 内的 `process.resourcesPath` 改写为 `/usr/lib/openzwork` 后重新打包，
+  否则系统 Electron 会到 `/usr/lib/electron44/resources` 找 `config/`、`glm/`、`tools/`；
+  重打包时 `*.node` 原生模块保持 unpacked，Electron 无法从 asar 内 dlopen。
+- 内置的 `rg` 换成 `ripgrep` 包的 `/usr/bin/rg`；内置的 Electron 运行时、`chrome-sandbox`
+  一律丢弃，交给 `electron44`。
+- 因而包体约 96 MB、安装后约 448 MB（上游自带的 Arch 包分别是 164 MB / 830 MB），
+  Electron 的安全更新也由 pacman 统一处理。
+
+`pkgver` 取自 release 名称（`3.18.2+openzwork.4` 这类版本里的 `+` 是合法的 pkgver 字符），
+`sha256` 优先读 release 附带的 **`SHA256SUMS`**，其次用 GitHub 记录的 digest，最后才下载现算。
+内置文档技能（docx/pdf/xlsx）依赖 `python-*` 系列，`nodejs` 供 npm 工具使用，两者都写成运行时依赖。
 
 许可证仅适用于脚本本身，不适用于生成的 AUR 包。
 
@@ -125,7 +151,8 @@ go build -o auto-aur .
   "createOnMissing": true,
   "packages": [
     { "task": "your-szu-life-bin" },
-    { "task": "your-szu-life-git" }
+    { "task": "your-szu-life-git" },
+    { "task": "openzwork-electron-bin" }
   ],
   "disabled": []
 }

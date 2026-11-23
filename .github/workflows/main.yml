@@ -57,7 +57,7 @@ jobs:
           # refuses to use a build cache it cannot own.
           su runner -c "cd '$GITHUB_WORKSPACE' && \
             HOME=/home/runner GOCACHE=/home/runner/.cache/go-build \
-            AUTO_AUR_REQUIRE_MAKEPKG=1 '$gobin' test ./repo/your-szu-life/ -run TestSrcinfoMatchesMakepkg -v"
+            AUTO_AUR_REQUIRE_MAKEPKG=1 '$gobin' test ./repo/... -run TestSrcinfoMatchesMakepkg -v"
 
   build:
     name: Auto AUR
